@@ -139,7 +139,8 @@ pub fn execute(
             Some(logfile)
         }
     };
-    let use_progress_bar = logfile.is_none();
+    let use_progress_bar =
+        logfile.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     let _logger_thread = redirect_stderr_to_file(logfile);
 
     info!("{} {}", crate_name!(), solana_version);
@@ -838,6 +839,16 @@ pub fn execute(
         tip_manager_config,
         preallocated_bundle_cost: value_of(matches, "preallocated_bundle_cost")
             .expect("preallocated_bundle_cost set as default"),
+
+        // Allnodes config
+        use_mostly_confirmed_threshold: !matches.is_present("disable_mostly_confirmed_threshold"),
+        mostly_confirmed_threshold_config_path: value_t!(
+            matches,
+            "mostly_confirmed_threshold_config",
+            PathBuf
+        )
+        .ok(),
+
         ..ValidatorConfig::default()
     };
 

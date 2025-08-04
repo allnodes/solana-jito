@@ -1,21 +1,29 @@
-<p align="center">
-  <a href="https://solana.com">
-    <img alt="Solana" src="https://i.imgur.com/0vfIMHo.png" width="250" />
-  </a>
-</p>
+## Jito's fork of the Solana validator with modifications from Allnodes
 
-[![Build status](https://badge.buildkite.com/3a7c88c0f777e1a0fddacc190823565271ae4c251ef78d83a8.svg)](https://buildkite.com/jito/jito-solana)
+## Modifications made by Allnodes
 
-# About
+This repository contains the following modifications from the original Solana repository with Jito's changes:
 
-This repository contains Jito's fork of the Solana validator.
+### 1. Enhanced Snapshot Download Performance
 
-We recommend checking out our [Gitbook](https://jito-foundation.gitbook.io/mev/jito-solana/building-the-software) for
-more detailed instructions on building and running Jito-Solana.
+Improved snapshot downloading speed during the bootstrap process by providing fast nodes for snapshots delivery. 
+
+### 2. Voting Modifications
+
+Added voting modifications that enhance the original voting logic. These modifications work by:
+
+- Taking the next votable slot that the original codebase identifies as potentially ready for voting
+- Applying additional criteria before casting the vote
+- Providing more sophisticated voting decision-making
+
+# Building and Running
 
 ---
+We recommend checking out Jito's [Gitbook](https://jito-foundation.gitbook.io/mev/jito-solana/building-the-software) for
+more detailed instructions on building and running Jito-Solana.
+---
 
-## **1. Install rustc, cargo and rustfmt.**
+## 1. Install rustc, cargo and rustfmt.
 
 ```bash
 $ curl https://sh.rustup.rs -sSf | sh
@@ -54,76 +62,80 @@ On Fedora:
 $ sudo dnf install openssl-devel systemd-devel pkg-config zlib-devel llvm clang cmake make protobuf-devel protobuf-compiler perl-core libclang-dev
 ```
 
-## **2. Download the source code.**
+## 2. Download the source code.
 
 ```bash
-$ git clone https://github.com/jito-foundation/jito-solana.git
-$ cd jito-solana
+$ git clone --recursive https://github.com/allnodes/solana-jito
+$ cd solana-jito
 ```
 
-## **3. Build.**
+## **3. Release build.**
 
 ```bash
-$ ./cargo build
+$ ./cargo build --release
 ```
 
-> [!NOTE]
-> Note that this builds a debug version that is **not suitable for running a testnet or mainnet validator**. Please read [`docs/src/cli/install.md`](docs/src/cli/install.md#build-from-source) for instructions to build a release version for test and production uses.
+## 4. Voting mods configuration.
 
-# Testing
+Voting mods (also known as "mostly confirmed threshold" voting patch) is enabled by default and use the default mods 
+configuration, which should work for most users. If you wish to use different configuration:
 
-**Run the test suite:**
+1. create a configuration file (default filename is `mostly_confirmed_threshold` located in the current directory from 
+   where you run the validator). Values in this example are defaults, their meanings will be explained in the next 
+   section:
 
 ```bash
-$ ./cargo test
+echo '0.45 4 0 24' > ./mostly_confirmed_threshold
 ```
 
-### Starting a local testnet
+2. optionally, you can provide a different filename and/or path for the config file using the 
+  `--mostly-confirmed-threshold-config <path/to/config/file>` argument.
 
-Start your own testnet locally, instructions are in the [online docs](https://docs.solanalabs.com/clusters/benchmark).
+> In order to disable voting mods, you need to add the `--disable-mostly-confirmed-threshold` flag to the validator
+command.
 
-### Accessing the remote development cluster
+## "Mostly confirmed threshold" configuration file format:
 
-* `devnet` - stable public cluster for development accessible via
-  devnet.solana.com. Runs 24/7. Learn more about the [public clusters](https://docs.solanalabs.com/clusters)
+The `mostly_confirmed_threshold` file contains a simple whitespace-separated list of four values:
 
-# Benchmarking
-
-First, install the nightly build of rustc. `cargo bench` requires the use of the
-unstable features only available in the nightly build.
-
-```bash
-$ rustup install nightly
+```
+a b c d
 ```
 
-Run the benchmarks:
+### Parameters
 
-```bash
-$ cargo +nightly bench
+#### *a* (float) - Vote Weight Threshold
+The minimum vote weight threshold required before voting on a slot. Slots that haven't achieved this vote weight will 
+not be voted on, except for:
+
+- Slots within the "vote ahead of threshold" region
+- When the escape hatch distance has been reached
+
+#### *b* (integer) - Vote Ahead of Threshold
+The number of slots ahead of the threshold slot to vote on, regardless of vote weight. This parameter reduces vote 
+latency by allowing voting on recent slots even if they haven't met the threshold.
+
+#### *c* (integer) - Skip Recovery Mode
+Controls the stake-weighted vote percentage required on a slot after skips have occurred. Must be one of:
+
+- `0` - No restriction
+- `1` - Slot after a skip must have `mostly_confirmed_threshold` before voting
+- `2` - Slot after a skip must be confirmed before voting
+
+#### *d* (integer) - Escape Hatch Distance
+The maximum number of slots to wait without voting while waiting for the threshold to be met. After this many slots of non-voting, the validator will vote anyway.
+
+**Purpose**: This escape hatch prevents network deadlock by ensuring progress even when the threshold isn't being achieved. Without this mechanism, if multiple forks occur simultaneously and all have less than the threshold vote weight, validators could become stuck waiting indefinitely.
+
+### Default Values
+
+When the configuration file is absent, the following default values are used:
+
+```
+0.45 4 0 24
 ```
 
-# Release Process
-
-The release process for this project is described [here](RELEASE.md).
-
-# Code coverage
-
-To generate code coverage statistics:
-
-```bash
-$ scripts/coverage.sh
-$ open target/cov/lcov-local/index.html
-```
-
-Why coverage? While most see coverage as a code quality metric, we see it primarily as a developer
-productivity metric. When a developer makes a change to the codebase, presumably it's a *solution* to
-some problem. Our unit-test suite is how we encode the set of *problems* the codebase solves. Running
-the test suite should indicate that your change didn't *infringe* on anyone else's solutions. Adding a
-test *protects* your solution from future changes. Say you don't understand why a line of code exists,
-try deleting it and running the unit-tests. The nearest test failure should tell you what problem
-was solved by that code. If no test fails, go ahead and submit a Pull Request that asks, "what
-problem is solved by this code?" On the other hand, if a test does fail and you can think of a
-better way to solve the same problem, a Pull Request with your solution would most certainly be
-welcome! Likewise, if rewriting a test can better communicate what code it's protecting, please
-send us that patch!
-
+- Threshold: 45% vote weight
+- Vote ahead: 4 slots
+- Skip recovery: No restriction
+- Escape hatch: 24 slots

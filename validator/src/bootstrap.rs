@@ -552,6 +552,56 @@ fn get_vetted_rpc_nodes(
     }
 }
 
+fn allnodes_add_fastest_rpc_node(
+    shred_version: u16,
+    vetted_rpc_nodes: &mut Vec<(ContactInfo, Option<SnapshotHash>, RpcClient)>,
+    blacklisted_rpc_nodes: &HashSet<Pubkey>,
+) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("Failed to build tokio runtime");
+    let snapshot_response: Option<allnodes_service_protos::SnapshotResponse> =
+        runtime.block_on(async move {
+            match allnodes_client::Client::for_shred_version(shred_version) {
+                None => None,
+                Some(client) => client
+                    .get_snapshot_node(&allnodes_service_protos::SnapshotRequest { shred_version })
+                    .await
+                    .inspect_err(|err| {
+                        error!("Failed to get snapshot node from Allnodes service: {err}")
+                    })
+                    .ok()
+                    .flatten(),
+            }
+        });
+
+    if let Some(resp) = snapshot_response {
+        if blacklisted_rpc_nodes.contains(&resp.pubkey) {
+            warn!(
+                "Skipping RPC node that is blacklisted: {}, will use standard algorithm",
+                resp.pubkey,
+            );
+            return;
+        }
+        info!("Using RPC node returned by Allnodes service: {}", resp.rpc);
+        let mut contact_info = ContactInfo::new(resp.pubkey, 0, shred_version);
+        contact_info
+            .set_rpc(resp.rpc)
+            .inspect_err(|err| warn!("Failed to set RPC address for RPC node: {err}"))
+            .ok();
+        vetted_rpc_nodes.push((
+            contact_info,
+            Some(SnapshotHash {
+                full: resp.snapshot_hash.full,
+                incr: Some(resp.snapshot_hash.incr),
+            }),
+            RpcClient::new_socket_with_timeout(resp.rpc, Duration::from_secs(5)),
+        ));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn rpc_bootstrap(
     node: &Node,
@@ -629,6 +679,13 @@ pub fn rpc_bootstrap(
             &mut blacklisted_rpc_nodes,
             &bootstrap_config,
         );
+
+        allnodes_add_fastest_rpc_node(
+            gossip.as_ref().unwrap().0.my_shred_version(),
+            &mut vetted_rpc_nodes,
+            &blacklisted_rpc_nodes,
+        );
+
         let (rpc_contact_info, snapshot_hash, rpc_client) = vetted_rpc_nodes.pop().unwrap();
         get_rpc_nodes_time += get_rpc_nodes_start.elapsed();
 
@@ -1237,6 +1294,13 @@ fn download_snapshot(
     let desired_snapshot_hash = (
         desired_snapshot_hash.0,
         solana_runtime::snapshot_hash::SnapshotHash(desired_snapshot_hash.1),
+    );
+    info!(
+        "Trying to download snapshots from: {} ({})",
+        rpc_contact_info
+            .rpc()
+            .ok_or_else(|| String::from("Invalid RPC address"))?,
+        rpc_contact_info.pubkey(),
     );
     download_snapshot_archive(
         &rpc_contact_info

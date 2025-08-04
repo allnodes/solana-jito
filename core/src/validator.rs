@@ -307,6 +307,10 @@ pub struct ValidatorConfig {
     pub shred_retransmit_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
     pub tip_manager_config: TipManagerConfig,
     pub preallocated_bundle_cost: u64,
+
+    // Allnodes configuration
+    pub use_mostly_confirmed_threshold: bool,
+    pub mostly_confirmed_threshold_config_path: Option<PathBuf>,
 }
 
 impl Default for ValidatorConfig {
@@ -388,6 +392,10 @@ impl Default for ValidatorConfig {
             shred_retransmit_receiver_address: Arc::new(RwLock::new(None)),
             tip_manager_config: TipManagerConfig::default(),
             preallocated_bundle_cost: 0,
+
+            // Allnodes configuration
+            use_mostly_confirmed_threshold: true,
+            mostly_confirmed_threshold_config_path: None,
         }
     }
 }
@@ -1532,6 +1540,13 @@ impl Validator {
                 None
             };
 
+        let voting_patch = crate::allnodes::VotingPatch::init(
+            config.use_mostly_confirmed_threshold,
+            config.mostly_confirmed_threshold_config_path.as_ref(),
+            cluster_info.my_shred_version(),
+        );
+        warn!("Voting patch initialized: {voting_patch:?}");
+
         let tvu = Tvu::new(
             vote_account,
             authorized_voter_keypairs,
@@ -1594,6 +1609,7 @@ impl Validator {
             slot_status_notifier,
             vote_connection_cache,
             config.shred_retransmit_receiver_address.clone(),
+            voting_patch,
         )
         .map_err(ValidatorError::Other)?;
 

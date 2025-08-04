@@ -8,6 +8,9 @@
 //! command-line tools to spin up validators and a Rust library
 //!
 
+// Allnodes improvements
+mod allnodes;
+
 pub mod accounts_hash_verifier;
 pub mod admin_rpc_post_init;
 pub mod banking_simulation;

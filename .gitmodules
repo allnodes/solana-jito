@@ -7,3 +7,7 @@
 [submodule "jito-protos/protos"]
 	path = jito-protos/protos
 	url = https://github.com/jito-labs/mev-protos.git
+[submodule "sdk"]
+	path = sdk
+	url = https://github.com/allnodes/solana-sdk.git
+	branch = allnodes/main
