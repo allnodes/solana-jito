@@ -1,4 +1,5 @@
 use {
+    allnodes_service_protos::BootstrapSnapshotNode,
     itertools::Itertools,
     log::*,
     rand::{seq::SliceRandom, thread_rng, Rng},
@@ -552,6 +553,35 @@ fn get_vetted_rpc_nodes(
     }
 }
 
+fn allnodes_push_rpc_node_to_vetted(
+    node: &BootstrapSnapshotNode,
+    shred_version: u16,
+    vetted_rpc_nodes: &mut Vec<(ContactInfo, Option<SnapshotHash>, RpcClient)>,
+    blacklisted_rpc_nodes: &HashSet<Pubkey>,
+) {
+    if blacklisted_rpc_nodes.contains(&node.pubkey) {
+        warn!(
+            "Skipping RPC node that is blacklisted: {}, will use standard algorithm",
+            node.pubkey,
+        );
+        return;
+    }
+    info!("Using RPC node returned by Allnodes service: {}", node.rpc);
+    let mut contact_info = ContactInfo::new(node.pubkey, 0, shred_version);
+    contact_info
+        .set_rpc(node.rpc)
+        .inspect_err(|err| warn!("Failed to set RPC address for RPC node: {err}"))
+        .ok();
+    vetted_rpc_nodes.push((
+        contact_info,
+        Some(SnapshotHash {
+            full: node.snapshot_hash.full,
+            incr: Some(node.snapshot_hash.incr),
+        }),
+        RpcClient::new_socket_with_timeout(node.rpc, Duration::from_secs(5)),
+    ));
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn rpc_bootstrap(
     node: &Node,
@@ -572,6 +602,7 @@ pub fn rpc_bootstrap(
     minimal_snapshot_download_speed: f32,
     maximum_snapshot_download_abort: u64,
     socket_addr_space: SocketAddrSpace,
+    snapshot_node: Option<BootstrapSnapshotNode>,
 ) {
     if do_port_check {
         let mut order: Vec<_> = (0..cluster_entrypoints.len()).collect();
@@ -596,41 +627,62 @@ pub fn rpc_bootstrap(
     let mut get_rpc_nodes_time = Duration::new(0, 0);
     let mut snapshot_download_time = Duration::new(0, 0);
     let mut blacklisted_rpc_nodes = HashSet::new();
-    let mut gossip = None;
+    let mut gossip: Option<(Arc<ClusterInfo>, Arc<AtomicBool>, GossipService)> = None;
     let mut vetted_rpc_nodes = vec![];
     let mut download_abort_count = 0;
+    let expected_shred_version = validator_config
+        .expected_shred_version
+        .expect("expected_shred_version should not be None");
+    let mut try_allnodes_resolver = true;
     loop {
-        if gossip.is_none() {
-            *start_progress.write().unwrap() = ValidatorStartProgress::SearchingForRpcService;
+        match snapshot_node.as_ref() {
+            Some(snapshot_node) if try_allnodes_resolver => {
+                allnodes_push_rpc_node_to_vetted(
+                    snapshot_node,
+                    expected_shred_version,
+                    &mut vetted_rpc_nodes,
+                    &blacklisted_rpc_nodes,
+                );
+                try_allnodes_resolver = false;
+                if vetted_rpc_nodes.is_empty() {
+                    continue;
+                }
+            }
 
-            gossip = Some(start_gossip_node(
-                identity_keypair.clone(),
-                cluster_entrypoints,
-                ledger_path,
-                &node
-                    .info
-                    .gossip()
-                    .expect("Operator must spin up node with valid gossip address"),
-                node.sockets.gossip.try_clone().unwrap(),
-                validator_config
-                    .expected_shred_version
-                    .expect("expected_shred_version should not be None"),
-                validator_config.gossip_validators.clone(),
-                should_check_duplicate_instance,
-                socket_addr_space,
-            ));
+            _ => {
+                if gossip.is_none() {
+                    *start_progress.write().unwrap() =
+                        ValidatorStartProgress::SearchingForRpcService;
+
+                    gossip = Some(start_gossip_node(
+                        identity_keypair.clone(),
+                        cluster_entrypoints,
+                        ledger_path,
+                        &node
+                            .info
+                            .gossip()
+                            .expect("Operator must spin up node with valid gossip address"),
+                        node.sockets.gossip.try_clone().unwrap(),
+                        expected_shred_version,
+                        validator_config.gossip_validators.clone(),
+                        should_check_duplicate_instance,
+                        socket_addr_space,
+                    ));
+                }
+
+                let get_rpc_nodes_start = Instant::now();
+                get_vetted_rpc_nodes(
+                    &mut vetted_rpc_nodes,
+                    &gossip.as_ref().unwrap().0,
+                    validator_config,
+                    &mut blacklisted_rpc_nodes,
+                    &bootstrap_config,
+                );
+                get_rpc_nodes_time += get_rpc_nodes_start.elapsed();
+            }
         }
 
-        let get_rpc_nodes_start = Instant::now();
-        get_vetted_rpc_nodes(
-            &mut vetted_rpc_nodes,
-            &gossip.as_ref().unwrap().0,
-            validator_config,
-            &mut blacklisted_rpc_nodes,
-            &bootstrap_config,
-        );
         let (rpc_contact_info, snapshot_hash, rpc_client) = vetted_rpc_nodes.pop().unwrap();
-        get_rpc_nodes_time += get_rpc_nodes_start.elapsed();
 
         let snapshot_download_start = Instant::now();
         let download_result = attempt_download_genesis_and_snapshot(
@@ -1237,6 +1289,13 @@ fn download_snapshot(
     let desired_snapshot_hash = (
         desired_snapshot_hash.0,
         solana_runtime::snapshot_hash::SnapshotHash(desired_snapshot_hash.1),
+    );
+    info!(
+        "Trying to download snapshots from: {} ({})",
+        rpc_contact_info
+            .rpc()
+            .ok_or_else(|| String::from("Invalid RPC address"))?,
+        rpc_contact_info.pubkey(),
     );
     download_snapshot_archive(
         &rpc_contact_info

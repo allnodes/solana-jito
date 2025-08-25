@@ -139,7 +139,8 @@ pub fn execute(
             Some(logfile)
         }
     };
-    let use_progress_bar = logfile.is_none();
+    let use_progress_bar =
+        logfile.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     let _logger_thread = redirect_stderr_to_file(logfile);
 
     info!("{} {}", crate_name!(), solana_version);
@@ -837,6 +838,16 @@ pub fn execute(
         tip_manager_config,
         preallocated_bundle_cost: value_of(matches, "preallocated_bundle_cost")
             .expect("preallocated_bundle_cost set as default"),
+
+        // Allnodes config
+        use_mostly_confirmed_threshold: !matches.is_present("disable_mostly_confirmed_threshold"),
+        mostly_confirmed_threshold_config_path: value_t!(
+            matches,
+            "mostly_confirmed_threshold_config",
+            PathBuf
+        )
+        .ok(),
+
         ..ValidatorConfig::default()
     };
 
@@ -1321,6 +1332,29 @@ pub fn execute(
 
     let identity_keypair = Arc::new(identity_keypair);
 
+    let bootstrap_info = {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("Failed to build tokio runtime");
+
+        runtime.block_on(async move {
+            let shred_version = validator_config
+                .expected_shred_version
+                .expect("expected_shred_version should not be None");
+            if let Some(client) = allnodes_client::Client::for_shred_version(shred_version).await {
+                client.get_bootstrap_info().await
+            } else {
+                None
+            }
+        })
+    };
+    let bootstrap_snapshot_node = bootstrap_info.and_then(|info| {
+        validator_config.voting_patch_flags = Some(info.flags);
+        info.node
+    });
+
     let should_check_duplicate_instance = true;
     if !cluster_entrypoints.is_empty() {
         bootstrap::rpc_bootstrap(
@@ -1342,6 +1376,7 @@ pub fn execute(
             minimal_snapshot_download_speed,
             maximum_snapshot_download_abort,
             socket_addr_space,
+            bootstrap_snapshot_node,
         );
         *start_progress.write().unwrap() = ValidatorStartProgress::Initializing;
     }
