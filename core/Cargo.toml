@@ -41,6 +41,10 @@ frozen-abi = [
 ]
 
 [dependencies]
+# Allnodes
+allnodes-client = { workspace = true }
+allnodes-service-protos = { workspace = true }
+
 agave-banking-stage-ingress-types = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-transaction-view = { workspace = true }

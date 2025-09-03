@@ -232,6 +232,24 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             ),
     )
     .arg(
+        Arg::with_name("disable_mostly_confirmed_threshold")
+            .long("disable-mostly-confirmed-threshold")
+            .takes_value(false)
+            .conflicts_with("mostly_confirmed_threshold_config")
+            .help("Disable the mostly confirmed threshold for voting and use the default voting behavior"),
+    )
+    .arg(
+        Arg::with_name("mostly_confirmed_threshold_config")
+            .long("mostly-confirmed-threshold-config")
+            .value_name("FILE")
+            .takes_value(true)
+            .validator(allnodes_solana::is_existing_file)
+            .conflicts_with("disable_mostly_confirmed_threshold")
+            .help(
+                "Path to a file containing mostly confirming threshold configuration. If not \
+                 provided, defaults to ./mostly_confirmed_threshold")
+    )
+    .arg(
         Arg::with_name("restricted_repair_only_mode")
             .long("restricted-repair-only-mode")
             .takes_value(false)
