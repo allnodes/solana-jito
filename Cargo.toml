@@ -143,6 +143,11 @@ members = [
     "zk-keygen",
     "zk-sdk",
     "zk-token-sdk",
+
+    # Allnodes
+    "allnodes/client",
+    "allnodes/solana",
+    "allnodes/protos/allnodes-service-protos",
 ]
 
 exclude = [
@@ -181,6 +186,11 @@ manual_let_else = "deny"
 used_underscore_binding = "deny"
 
 [workspace.dependencies]
+# Allnodes
+allnodes-client = { path = "allnodes/client" }
+allnodes-service-protos = { path = "allnodes/protos/allnodes-service-protos" }
+allnodes-solana = { path = "allnodes/solana" }
+
 Inflector = "0.11.4"
 aes-gcm-siv = "0.11.1"
 agave-banking-stage-ingress-types = { path = "banking-stage-ingress-types", version = "=2.3.8" }
@@ -692,3 +702,9 @@ crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "fd279d
 # comments and the overrides in sync.
 solana-curve25519 = { path = "curves/curve25519" }
 solana-zk-sdk = { path = "zk-sdk" }
+
+# Allnodes sdk customizations
+solana-file-download = { path = "sdk/file-download" }
+solana-logger = { path = "sdk/logger" }
+solana-sha256-hasher = { path = "sdk/sha256-hasher" }
+solana-vote-interface = { path = "sdk/vote-interface" }

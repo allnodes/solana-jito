@@ -613,7 +613,7 @@ impl Tower {
         vote_account.vote_state_view().last_voted_slot()
     }
 
-    pub fn record_bank_vote(&mut self, bank: &Bank) -> Option<Slot> {
+    pub fn record_bank_vote(&mut self, bank: &Bank, pop_expired: bool) -> Option<Slot> {
         // Returns the new root if one is made after applying a vote for the given bank to
         // `self.vote_state`
         let block_id = bank.block_id().unwrap_or_else(|| {
@@ -626,6 +626,7 @@ impl Tower {
         self.record_bank_vote_and_update_lockouts(
             bank.slot(),
             bank.hash(),
+            pop_expired,
             bank.feature_set
                 .is_active(&agave_feature_set::enable_tower_sync_ix::id()),
             block_id,
@@ -663,6 +664,7 @@ impl Tower {
         &mut self,
         vote_slot: Slot,
         vote_hash: Hash,
+        pop_expired: bool,
         enable_tower_sync_ix: bool,
         block_id: Hash,
     ) -> Option<Slot> {
@@ -680,7 +682,8 @@ impl Tower {
         trace!("{} record_vote for {}", self.node_pubkey, vote_slot);
         let old_root = self.root();
 
-        self.vote_state.process_next_vote_slot(vote_slot);
+        self.vote_state
+            .process_next_vote_slot_may_pop_expired(vote_slot, pop_expired);
         self.update_last_vote_from_vote_state(vote_hash, enable_tower_sync_ix, block_id);
 
         let new_root = self.root();
@@ -699,7 +702,7 @@ impl Tower {
 
     #[cfg(feature = "dev-context-only-utils")]
     pub fn record_vote(&mut self, slot: Slot, hash: Hash) -> Option<Slot> {
-        self.record_bank_vote_and_update_lockouts(slot, hash, true, Hash::default())
+        self.record_bank_vote_and_update_lockouts(slot, hash, true, true, Hash::default())
     }
 
     #[cfg(feature = "dev-context-only-utils")]

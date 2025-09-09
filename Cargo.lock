@@ -403,6 +403,9 @@ name = "agave-validator"
 version = "2.3.8"
 dependencies = [
  "agave-geyser-plugin-interface",
+ "allnodes-client",
+ "allnodes-service-protos",
+ "allnodes-solana",
  "assert_cmd",
  "chrono",
  "clap 2.33.3",
@@ -562,6 +565,33 @@ checksum = "67fc08ce920c31afb70f013dcce1bfc3a3195de6a228474e45e1f145b36f8d04"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "allnodes-client"
+version = "2.3.8"
+dependencies = [
+ "allnodes-service-protos",
+ "log",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
+name = "allnodes-service-protos"
+version = "2.3.8"
+dependencies = [
+ "borsh 1.5.7",
+ "prost",
+ "solana-hash",
+ "solana-pubkey",
+ "thiserror 2.0.12",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
+name = "allnodes-solana"
+version = "2.3.8"
 
 [[package]]
 name = "alloc-no-stdlib"
@@ -3632,20 +3662,6 @@ dependencies = [
 
 [[package]]
 name = "hyper-rustls"
-version = "0.24.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d78e1e73ec14cf7375674f74d7dde185c8206fd9dea6fb6295e8a98098aaa97"
-dependencies = [
- "futures-util",
- "http 0.2.12",
- "hyper 0.14.32",
- "rustls 0.21.12",
- "tokio",
- "tokio-rustls 0.24.1",
-]
-
-[[package]]
-name = "hyper-rustls"
 version = "0.27.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d191583f3da1305256f22463b9bb0471acad48a4e534a5218b9963e9c1f59b2"
@@ -5945,7 +5961,6 @@ version = "0.11.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd67538700a17451e7cba03ac727fb961abb7607553461627b97de0b89cf4a62"
 dependencies = [
- "async-compression",
  "base64 0.21.7",
  "bytes",
  "encoding_rs",
@@ -5955,7 +5970,6 @@ dependencies = [
  "http 0.2.12",
  "http-body 0.4.5",
  "hyper 0.14.32",
- "hyper-rustls 0.24.1",
  "hyper-tls",
  "ipnet",
  "js-sys",
@@ -5965,7 +5979,6 @@ dependencies = [
  "once_cell",
  "percent-encoding 2.3.1",
  "pin-project-lite",
- "rustls 0.21.12",
  "rustls-pemfile",
  "serde",
  "serde_json",
@@ -5974,14 +5987,11 @@ dependencies = [
  "system-configuration",
  "tokio",
  "tokio-native-tls",
- "tokio-rustls 0.24.1",
- "tokio-util 0.7.15",
  "tower-service",
  "url 2.5.4",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 0.25.2",
  "winreg",
 ]
 
@@ -6001,7 +6011,7 @@ dependencies = [
  "http-body 1.0.1",
  "http-body-util",
  "hyper 1.6.0",
- "hyper-rustls 0.27.5",
+ "hyper-rustls",
  "hyper-util",
  "ipnet",
  "js-sys",
@@ -8065,6 +8075,8 @@ dependencies = [
  "agave-reserved-account-keys",
  "agave-transaction-view",
  "ahash 0.8.11",
+ "allnodes-client",
+ "allnodes-service-protos",
  "anchor-lang",
  "anyhow",
  "arrayvec",
@@ -8620,13 +8632,11 @@ dependencies = [
 [[package]]
 name = "solana-file-download"
 version = "2.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96156c84b006ce3f00b37fa852a7d93de13ede4c40a58269663c3e01907453e3"
 dependencies = [
  "console",
  "indicatif",
  "log",
- "reqwest 0.11.27",
+ "reqwest 0.12.16",
 ]
 
 [[package]]
@@ -9297,8 +9307,6 @@ dependencies = [
 [[package]]
 name = "solana-logger"
 version = "2.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db8e777ec1afd733939b532a42492d888ec7c88d8b4127a5d867eb45c6eb5cd5"
 dependencies = [
  "env_logger",
  "lazy_static",
@@ -10720,8 +10728,6 @@ dependencies = [
 [[package]]
 name = "solana-sha256-hasher"
 version = "2.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0037386961c0d633421f53560ad7c80675c0447cba4d1bb66d60974dd486c7ea"
 dependencies = [
  "sha2 0.10.9",
  "solana-define-syscall",
@@ -11957,8 +11963,6 @@ dependencies = [
 [[package]]
 name = "solana-vote-interface"
 version = "2.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef4f08746f154458f28b98330c0d55cb431e2de64ee4b8efc98dcbe292e0672b"
 dependencies = [
  "arbitrary",
  "bincode",
