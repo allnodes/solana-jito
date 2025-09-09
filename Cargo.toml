@@ -143,6 +143,11 @@ members = [
     "xdp",
     "zk-keygen",
     "zk-token-sdk",
+
+    # Allnodes
+    "allnodes/client",
+    "allnodes/solana",
+    "allnodes/protos/allnodes-service-protos",
 ]
 
 exclude = [
@@ -180,6 +185,11 @@ manual_let_else = "deny"
 used_underscore_binding = "deny"
 
 [workspace.dependencies]
+# Allnodes
+allnodes-client = { path = "allnodes/client" }
+allnodes-service-protos = { path = "allnodes/protos/allnodes-service-protos" }
+allnodes-solana = { path = "allnodes/solana" }
+
 Inflector = "0.11.4"
 aes-gcm-siv = "0.11.1"
 agave-banking-stage-ingress-types = { path = "banking-stage-ingress-types", version = "=3.0.1" }
@@ -453,7 +463,7 @@ solana-genesis-utils = { path = "genesis-utils", version = "=3.0.1" }
 solana-geyser-plugin-manager = { path = "geyser-plugin-manager", version = "=3.0.1" }
 solana-gossip = { path = "gossip", version = "=3.0.1" }
 solana-hard-forks = "3.0.0"
-solana-hash = "3.0.0"
+solana-hash = { version = "3.0.0", features = ["borsh"] }
 solana-inflation = "3.0.0"
 solana-instruction = "3.0.0"
 solana-instruction-error = "2.0.0"
@@ -690,3 +700,9 @@ crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "fd279d
 # There is a similar override in `programs/sbf/Cargo.toml`.  Please keep both
 # comments and the overrides in sync.
 solana-curve25519 = { path = "curves/curve25519" }
+
+# Allnodes sdk customizations
+solana-file-download = { path = "sdk/file-download" }
+solana-logger = { path = "sdk/logger" }
+solana-sha256-hasher = { path = "sdk/sha256-hasher" }
+solana-vote-interface = { path = "sdk/vote-interface" }
