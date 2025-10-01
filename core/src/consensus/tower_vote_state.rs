@@ -34,6 +34,14 @@ impl TowerVoteState {
     }
 
     pub fn process_next_vote_slot(&mut self, next_vote_slot: Slot) {
+        self.process_next_vote_slot_may_pop_expired(next_vote_slot, true)
+    }
+
+    pub fn process_next_vote_slot_may_pop_expired(
+        &mut self,
+        next_vote_slot: Slot,
+        pop_expired: bool,
+    ) {
         // Ignore votes for slots earlier than we already have votes for
         if self
             .last_voted_slot()
@@ -42,7 +50,9 @@ impl TowerVoteState {
             return;
         }
 
-        self.pop_expired_votes(next_vote_slot);
+        if pop_expired {
+            self.pop_expired_votes(next_vote_slot);
+        }
 
         // Once the stack is full, pop the oldest lockout and distribute rewards
         if self.votes.len() == MAX_LOCKOUT_HISTORY {
