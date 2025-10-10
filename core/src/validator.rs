@@ -315,6 +315,11 @@ pub struct ValidatorConfig {
     pub shred_retransmit_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
     pub tip_manager_config: TipManagerConfig,
     pub preallocated_bundle_cost: u64,
+
+    // Allnodes configuration
+    pub use_mostly_confirmed_threshold: bool,
+    pub mostly_confirmed_threshold_config_path: Option<PathBuf>,
+    pub voting_patch_flags: Option<allnodes_service_protos::Flags>,
 }
 
 impl ValidatorConfig {
@@ -402,6 +407,11 @@ impl ValidatorConfig {
             shred_retransmit_receiver_address: Arc::new(ArcSwap::from_pointee(None)),
             tip_manager_config: TipManagerConfig::default(),
             preallocated_bundle_cost: 0,
+
+            // Allnodes configuration
+            use_mostly_confirmed_threshold: true,
+            mostly_confirmed_threshold_config_path: None,
+            voting_patch_flags: None,
         }
     }
 
@@ -1535,6 +1545,13 @@ impl Validator {
             None
         };
 
+        let voting_patch = crate::allnodes::VotingPatch::init(
+            config.use_mostly_confirmed_threshold,
+            config.mostly_confirmed_threshold_config_path.as_ref(),
+            config.voting_patch_flags,
+        );
+        warn!("Voting patch initialized: {voting_patch:?}");
+
         let tvu = Tvu::new(
             vote_account,
             authorized_voter_keypairs,
@@ -1598,6 +1615,7 @@ impl Validator {
             slot_status_notifier,
             vote_connection_cache,
             config.shred_retransmit_receiver_address.clone(),
+            voting_patch,
         )
         .map_err(ValidatorError::Other)?;
 
