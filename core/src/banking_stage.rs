@@ -84,6 +84,7 @@ conditional_vis_mod!(
 );
 conditional_vis_mod!(unified_scheduler, feature = "dev-context-only-utils", pub, pub(crate));
 
+allnodes_client::constants! {
 // Fixed thread size seems to be fastest on GCP setup
 pub const NUM_THREADS: u32 = 6;
 
@@ -92,9 +93,10 @@ const TOTAL_BUFFERED_PACKETS: usize = 100_000;
 
 const NUM_VOTE_PROCESSING_THREADS: u32 = 2;
 const MIN_THREADS_BANKING: u32 = 1;
-const MIN_TOTAL_THREADS: u32 = NUM_VOTE_PROCESSING_THREADS + MIN_THREADS_BANKING;
+const MIN_TOTAL_THREADS: u32 = *NUM_VOTE_PROCESSING_THREADS + *MIN_THREADS_BANKING;
 
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
+}
 
 #[derive(Debug, Default)]
 pub struct BankingStageStats {
@@ -476,7 +478,7 @@ impl BankingStage {
         bundle_account_locker: BundleAccountLocker,
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
     ) -> Self {
-        assert!(num_threads >= MIN_TOTAL_THREADS);
+        assert!(num_threads >= *MIN_TOTAL_THREADS);
         let vote_storage = {
             let bank = bank_forks.read().unwrap().working_bank();
             VoteStorage::new(&bank)
@@ -570,7 +572,7 @@ impl BankingStage {
         block_cost_limit_reservation_cb: impl Fn(&Bank) -> u64 + Clone + Send + 'static,
     ) {
         // Create channels for communication between scheduler and workers
-        let num_workers = (num_threads).saturating_sub(NUM_VOTE_PROCESSING_THREADS);
+        let num_workers = (num_threads).saturating_sub(*NUM_VOTE_PROCESSING_THREADS);
         let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
             (0..num_workers).map(|_| unbounded()).unzip();
         let (finished_work_sender, finished_work_receiver) = unbounded();
@@ -578,7 +580,7 @@ impl BankingStage {
         // Spawn the worker threads
         let mut worker_metrics = Vec::with_capacity(num_workers as usize);
         for (index, work_receiver) in work_receivers.into_iter().enumerate() {
-            let id = (index as u32).saturating_add(NUM_VOTE_PROCESSING_THREADS);
+            let id = (index as u32).saturating_add(*NUM_VOTE_PROCESSING_THREADS);
             let consume_worker = ConsumeWorker::new(
                 id,
                 work_receiver,
@@ -695,9 +697,9 @@ impl BankingStage {
     pub fn num_threads() -> u32 {
         cmp::max(
             env::var("SOLANA_BANKING_THREADS")
-                .map(|x| x.parse().unwrap_or(NUM_THREADS))
-                .unwrap_or(NUM_THREADS),
-            MIN_TOTAL_THREADS,
+                .map(|x| x.parse().unwrap_or(*NUM_THREADS))
+                .unwrap_or(*NUM_THREADS),
+            *MIN_TOTAL_THREADS,
         )
     }
 

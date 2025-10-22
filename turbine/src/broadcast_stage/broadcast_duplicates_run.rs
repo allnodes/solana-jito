@@ -13,8 +13,10 @@ use {
     std::collections::HashSet,
 };
 
+allnodes_client::constants! {
 pub const MINIMUM_DUPLICATE_SLOT: Slot = 20;
 pub const DUPLICATE_RATE: usize = 10;
+}
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum ClusterPartition {
@@ -122,8 +124,8 @@ impl BroadcastRun for BroadcastDuplicatesRun {
         // in the slot to make verification fail on validators
         let last_entries = {
             if last_tick_height == bank.max_tick_height()
-                && bank.slot() > MINIMUM_DUPLICATE_SLOT
-                && self.num_slots_broadcasted % DUPLICATE_RATE == 0
+                && bank.slot() > *MINIMUM_DUPLICATE_SLOT
+                && self.num_slots_broadcasted % *DUPLICATE_RATE == 0
                 && self.recent_blockhash.is_some()
             {
                 let entry_batch_len = receive_results.entries.len();

@@ -794,7 +794,7 @@ impl AncestorHashesService {
                     // this dead slot was duplicate confirmed and will make it into in the main fork.
                     // This means it's worth asking the cluster to get the correct version.
                     if completed_dead_slot_supporters.total_support() as f64 / total_stake as f64
-                        > DUPLICATE_THRESHOLD
+                        > *DUPLICATE_THRESHOLD
                     {
                         repairable_dead_slot_pool.insert(*dead_slot);
                         false

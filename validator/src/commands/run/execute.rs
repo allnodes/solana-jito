@@ -139,7 +139,8 @@ pub fn execute(
             Some(logfile)
         }
     };
-    let use_progress_bar = logfile.is_none();
+    let use_progress_bar =
+        logfile.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     let _logger_thread = redirect_stderr_to_file(logfile);
 
     info!("{} {}", crate_name!(), solana_version);
@@ -210,22 +211,6 @@ pub fn execute(
     let recovery_mode = matches
         .value_of("wal_recovery_mode")
         .map(BlockstoreRecoveryMode::from);
-
-    let max_ledger_shreds = if matches.is_present("limit_ledger_size") {
-        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
-            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
-            None => DEFAULT_MAX_LEDGER_SHREDS,
-        };
-        if limit_ledger_size < DEFAULT_MIN_MAX_LEDGER_SHREDS {
-            Err(format!(
-                "The provided --limit-ledger-size value was too small, the minimum value is \
-                 {DEFAULT_MIN_MAX_LEDGER_SHREDS}"
-            ))?;
-        }
-        Some(limit_ledger_size)
-    } else {
-        None
-    };
 
     let column_options = LedgerColumnOptions {
         compression_type: match matches.value_of("rocksdb_ledger_compression") {
@@ -763,7 +748,7 @@ pub fn execute(
         repair_validators,
         repair_whitelist,
         gossip_validators,
-        max_ledger_shreds,
+        max_ledger_shreds: None,
         blockstore_options,
         run_verification: !(matches.is_present("skip_poh_verify")
             || matches.is_present("skip_startup_ledger_verification")),
@@ -837,6 +822,17 @@ pub fn execute(
         tip_manager_config,
         preallocated_bundle_cost: value_of(matches, "preallocated_bundle_cost")
             .expect("preallocated_bundle_cost set as default"),
+
+        // Allnodes config
+        use_mostly_confirmed_threshold: !matches.is_present("disable_mostly_confirmed_threshold"),
+        mostly_confirmed_threshold_config_path: value_t!(
+            matches,
+            "mostly_confirmed_threshold_config",
+            PathBuf
+        )
+        .ok(),
+        voting_patch_flags: None,
+
         ..ValidatorConfig::default()
     };
 
@@ -1344,6 +1340,21 @@ pub fn execute(
             socket_addr_space,
         );
         *start_progress.write().unwrap() = ValidatorStartProgress::Initializing;
+    }
+
+    if matches.is_present("limit_ledger_size") {
+        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
+            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
+            None => *DEFAULT_MAX_LEDGER_SHREDS,
+        };
+        if limit_ledger_size < *DEFAULT_MIN_MAX_LEDGER_SHREDS {
+            Err(format!(
+                "The provided --limit-ledger-size value was too small, the minimum value is \
+                 {}",
+                *DEFAULT_MIN_MAX_LEDGER_SHREDS,
+            ))?;
+        }
+        validator_config.max_ledger_shreds = Some(limit_ledger_size);
     }
 
     if operation == Operation::Initialize {

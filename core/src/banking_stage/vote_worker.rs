@@ -81,7 +81,7 @@ impl VoteWorker {
 
         loop {
             if !self.storage.is_empty()
-                || last_metrics_update.elapsed() >= SLOT_BOUNDARY_CHECK_PERIOD
+                || last_metrics_update.elapsed() >= *SLOT_BOUNDARY_CHECK_PERIOD
             {
                 let (_, process_buffered_packets_us) = measure_us!(self.process_buffered_packets(
                     &mut banking_stage_stats,

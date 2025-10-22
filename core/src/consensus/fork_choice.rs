@@ -150,7 +150,7 @@ fn recheck_fork_decision_failed_switch_threshold(
         threshold stake: {}, \
         total stake: {total_stake}",
         reset_bank.as_ref().map(|b| b.slot()),
-        total_stake as f64 * SWITCH_FORK_THRESHOLD,
+        total_stake as f64 * *SWITCH_FORK_THRESHOLD,
     );
     failure_reasons.push(HeaviestForkFailures::FailedSwitchThreshold(
         heaviest_bank_slot,
