@@ -1,93 +1,109 @@
-name: Release
+name: Release Build
 
 on:
   push:
-    tags:
-      - "*"
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  GITHUB_TOKEN: ${{ github.token }}
 
 jobs:
-  trigger-buildkite-pipeline:
-    if: github.repository == 'jito-foundation/jito-solana'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger a Buildkite Build
-        uses: "buildkite/trigger-pipeline-action@v2.2.0"
-        with:
-          buildkite_api_access_token: ${{ secrets.TRIGGER_BK_BUILD_TOKEN }}
-          pipeline: "jito/agave-secondary"
-          branch: "${{ github.ref_name }}"
-          build_env_vars: '{"TRIGGERED_BUILDKITE_TAG": "${{ github.ref_name }}"}'
-          commit: "HEAD"
-          message: ":github: Triggered from a GitHub Action"
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write  # Required for creating releases
 
-  draft-release:
-    if: github.repository == 'jito-foundation/jito-solana'
-    runs-on: ubuntu-latest
     steps:
-      - name: Create Release
-        uses: actions/github-script@v7
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: '${{ github.ref_name }}',
-              name: 'Release ${{ github.ref_name }}',
-              body: '🚧',
-              draft: false,
-              prerelease: true
-            })
+          submodules: recursive
 
-#  version-bump:
-#    if: github.repository == 'anza-xyz/agave'
-#    runs-on: ubuntu-latest
-#    steps:
-#      - name: Checkout code
-#        uses: actions/checkout@v4
-#        with:
-#          fetch-depth: 0
-#          token: ${{ secrets.VERSION_BUMP_PAT }}
-#
-#      - name: Parse Info
-#        id: parse_info
-#        run: |
-#          # get the next version
-#          version=${{ github.ref_name }}
-#          major=$(echo $version | cut -d'.' -f1)
-#          minor=$(echo $version | cut -d'.' -f2)
-#          patch=$(echo $version | cut -d'.' -f3)
-#          next_version=$major.$minor.$((patch+1))
-#          : "${next_version:?}"
-#
-#          # get the traget branch
-#          target_branch=$major.$minor
-#          : "${target_branch:?}"
-#
-#          echo "next_version=$next_version" | tee -a $GITHUB_OUTPUT
-#          echo "target_branch=$target_branch" | tee -a $GITHUB_OUTPUT
-#
-#      - name: Create branch and make changes
-#        run: |
-#          next_version=${{ steps.parse_info.outputs.next_version }}
-#
-#          git checkout -b version-bump-$next_version
-#          ./scripts/increment-cargo-version.sh patch
-#
-#          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-#          git config user.name "github-actions[bot]"
-#          git commit -am "Bump version to $next_version"
-#          git push origin version-bump-$next_version
-#
-#      - name: Create PR
-#        uses: actions/github-script@v7
-#        with:
-#          github-token: ${{ secrets.GITHUB_TOKEN }}
-#          script: |
-#            github.rest.pulls.create({
-#              owner: context.repo.owner,
-#              repo: context.repo.repo,
-#              title: 'Bump version to ${{ steps.parse_info.outputs.next_version }}',
-#              head: 'version-bump-${{ steps.parse_info.outputs.next_version }}',
-#              base: '${{ steps.parse_info.outputs.target_branch }}'
-#            })
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG=${{ github.event.inputs.tag }}
+          else
+            TAG=${{ github.ref_name }}
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "tag=${TAG}"
+
+      - name: Install dependencies
+        shell: bash
+        run: source .github/scripts/install-all-deps.sh ${{ runner.os }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-x86_64-unknown-linux-gnu-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-x86_64-unknown-linux-gnu-cargo-
+
+      - name: Build release binaries
+        id: build
+        run: cargo build --verbose --locked --release
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: debuginfo
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CFLAGS: -O3
+          CXXFLAGS: -O3
+
+      - name: Fetch Solana Performance libraries
+        run: |
+          chmod +x fetch-perf-libs.sh
+          ./fetch-perf-libs.sh
+
+      - name: Archive binaries
+        id: archive
+        run: |
+          chmod +x .github/scripts/archive-binaries.sh
+          .github/scripts/archive-binaries.sh
+        env:
+          WORKSPACE_ROOT: ${{ github.workspace }}
+          TAG: ${{ steps.tag.outputs.tag }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          body: |
+            ## Release ${{ steps.tag.outputs.tag }}
+            
+            ### 📦 Binaries Included
+            - **Archive**: `${{ steps.archive.outputs.archive-name }}`
+            - **Archive Size**: ${{ steps.archive.outputs.archive-size }}
+            
+            ### 🚀 Installation
+            ```bash
+            # Download and extract
+            curl -OJL "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/${{ steps.archive.outputs.archive-name }}"
+            mkdir agave-validator
+            tar -xzf ${{ steps.archive.outputs.archive-name }} -C agave-validator
+            
+            # Binaries will be in the 'agave-validator/bin' directory
+            ls agave-validator/bin
+            ```
+            
+            ### 📋 Changes
+            - Auto-generated release from tag `${{ steps.tag.outputs.tag }}`
+            
+            ---
+            *Built from commit: ${{ github.sha }}*
+          files: ${{ steps.archive.outputs.archive-path }}
+          draft: false
+          prerelease: false
+          token: ${{ github.token }}
