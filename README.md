@@ -1,13 +1,20 @@
-## Jito's fork of the Solana validator with modifications from Allnodes
+<p align="center">
+    <br /><br />
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="allnodes/images/jito-dark-mode.png">
+      <img alt="Jito Allnodes Edition" src="allnodes/images/jito-light-mode.png" style="width: 16em">
+    </picture>
+</p>
+
+# Jito's fork of the Solana validator with modifications from Allnodes
 
 ## Modifications made by Allnodes
-
-> ⚠️ **Note:** Fast snapshot downloading and enhanced voting logic are only available while running on 
-> [Allnodes Bare-Metal Servers](https://www.allnodes.com/hosting).
 
 This repository features the following enhancements to the Jito-Solana codebase:
 
 ### 1. Fast snapshot distribution
+
+✅ Only on [Allnodes Bare-Metal Servers](https://www.allnodes.com/hosting)
 
 Our infrastructure includes modifications that improve default snapshot downloading, which combined with
 ultra-high-speed channels deliver ultra-fast snapshot downloads. This dramatically reduces the initial sync time for
@@ -15,6 +22,8 @@ new validators and enables faster deployment and recovery scenarios. The use of 
 download tools is no longer needed.
 
 ### 2. Enhanced voting logic modifications
+
+✅ Only on [Allnodes Bare-Metal Servers](https://www.allnodes.com/hosting)
 
 Our validator implementation includes voting modifications developed by **Zantetsu | Shinobi Systems** that enhance the
 original voting logic.
@@ -34,14 +43,13 @@ hashing operations using SHA-NI instructions available on modern AMD processors 
 architectures). This enhancement significantly improves hashing performance for block verification and other
 cryptographic operations.
 
-# Building and running
+## Building and running
 
----
-We recommend checking out Jito's [Gitbook](https://jito-foundation.gitbook.io/mev/jito-solana/building-the-software) for
-more detailed instructions on building and running Jito-Solana.
----
+> [!NOTE]
+> We recommend checking out Jito's [Gitbook](https://jito-foundation.gitbook.io/mev/jito-solana/building-the-software) 
+> for more detailed instructions on building and running Jito-Solana.
 
-## 1. Install rustc, cargo and rustfmt
+### 1. Install rustc, cargo and rustfmt
 
 ```bash
 $ curl https://sh.rustup.rs -sSf | sh
@@ -70,7 +78,7 @@ On Fedora:
 $ sudo dnf install openssl-devel systemd-devel pkg-config zlib-devel llvm clang cmake make protobuf-devel protobuf-compiler perl-core libclang-dev curl git
 ```
 
-## 2. Download the source code
+### 2. Download the source code
 
 To download the source code, run (substitute `<version>` with the version tag you want to build):
 
@@ -79,13 +87,13 @@ $ git clone --recursive https://github.com/allnodes/solana-jito --branch <versio
 $ cd solana-jito
 ```
 
-## 3. Release build
+### 3. Release build
 
 ```bash
 $ ./cargo build --release
 ```
 
-## 4. Voting mod configuration
+### 4. Voting mod configuration
 
 Voting mod (also known as "mostly confirmed threshold" voting patch) is enabled by default and comes with a predefined 
 configuration which should work for most users. If you wish to use a custom configuration:
