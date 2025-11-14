@@ -127,7 +127,8 @@ pub fn execute(
         println!("log file: {logfile}");
         Some(logfile)
     };
-    let use_progress_bar = logfile.is_none();
+    let use_progress_bar =
+        logfile.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     let _logger_thread = redirect_stderr_to_file(logfile);
 
     info!("{} {}", crate_name!(), solana_version);
@@ -179,22 +180,6 @@ pub fn execute(
             ledger_path.display(),
         )
     })?;
-
-    let max_ledger_shreds = if matches.is_present("limit_ledger_size") {
-        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
-            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
-            None => DEFAULT_MAX_LEDGER_SHREDS,
-        };
-        if limit_ledger_size < DEFAULT_MIN_MAX_LEDGER_SHREDS {
-            Err(format!(
-                "The provided --limit-ledger-size value was too small, the minimum value is \
-                 {DEFAULT_MIN_MAX_LEDGER_SHREDS}"
-            ))?;
-        }
-        Some(limit_ledger_size)
-    } else {
-        None
-    };
 
     let debug_keys: Option<Arc<HashSet<_>>> = if matches.is_present("debug_key") {
         Some(Arc::new(
@@ -648,7 +633,7 @@ pub fn execute(
         repair_whitelist,
         repair_handler_type: RepairHandlerType::default(),
         gossip_validators,
-        max_ledger_shreds,
+        max_ledger_shreds: None,
         blockstore_options: run_args.blockstore_options,
         run_verification: !matches.is_present("skip_startup_ledger_verification"),
         debug_keys,
@@ -684,8 +669,7 @@ pub fn execute(
         no_os_network_stats_reporting: matches.is_present("no_os_network_stats_reporting"),
         no_os_cpu_stats_reporting: matches.is_present("no_os_cpu_stats_reporting"),
         no_os_disk_stats_reporting: matches.is_present("no_os_disk_stats_reporting"),
-        poh_pinned_cpu_core: value_of(matches, "poh_pinned_cpu_core")
-            .unwrap_or(poh_service::DEFAULT_PINNED_CPU_CORE),
+        poh_pinned_cpu_core: value_of(matches, "poh_pinned_cpu_core"),
         poh_hashes_per_batch: value_of(matches, "poh_hashes_per_batch")
             .unwrap_or(poh_service::DEFAULT_HASHES_PER_BATCH),
         process_ledger_before_services: matches.is_present("process_ledger_before_services"),
@@ -751,6 +735,16 @@ pub fn execute(
         tip_manager_config,
         preallocated_bundle_cost: value_of(matches, "preallocated_bundle_cost")
             .expect("preallocated_bundle_cost set as default"),
+
+        // Allnodes config
+        use_mostly_confirmed_threshold: !matches.is_present("disable_mostly_confirmed_threshold"),
+        mostly_confirmed_threshold_config_path: value_t!(
+            matches,
+            "mostly_confirmed_threshold_config",
+            PathBuf
+        )
+        .ok(),
+        voting_patch_flags: None,
     };
 
     let reserved = validator_config
@@ -1034,6 +1028,21 @@ pub fn execute(
             run_args.socket_addr_space,
         );
         *start_progress.write().unwrap() = ValidatorStartProgress::Initializing;
+    }
+
+    if matches.is_present("limit_ledger_size") {
+        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
+            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
+            None => *DEFAULT_MAX_LEDGER_SHREDS,
+        };
+        if limit_ledger_size < *DEFAULT_MIN_MAX_LEDGER_SHREDS {
+            Err(format!(
+                "The provided --limit-ledger-size value was too small, the minimum value is \
+                 {}",
+                *DEFAULT_MIN_MAX_LEDGER_SHREDS,
+            ))?;
+        }
+        validator_config.max_ledger_shreds = Some(limit_ledger_size);
     }
 
     if operation == Operation::Initialize {
