@@ -156,14 +156,14 @@ impl VotingService {
         // Attempt to send our vote transaction to the leaders for the next few
         // slots. From the current slot to the forwarding slot offset
         // (inclusive).
+        allnodes_client::constants! {
         const UPCOMING_LEADER_FANOUT_SLOTS: u64 =
             FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET.saturating_add(1);
-        #[cfg(test)]
-        static_assertions::const_assert_eq!(UPCOMING_LEADER_FANOUT_SLOTS, 3);
+        }
         let upcoming_leader_sockets = upcoming_leader_tpu_vote_sockets(
             cluster_info,
             poh_recorder,
-            UPCOMING_LEADER_FANOUT_SLOTS,
+            *UPCOMING_LEADER_FANOUT_SLOTS,
             connection_cache.protocol(),
         );
 
