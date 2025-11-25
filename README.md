@@ -1,21 +1,62 @@
 <p align="center">
-  <a href="https://anza.xyz">
-    <img alt="Anza" src="https://i.postimg.cc/VkKTnMM9/agave-logo-talc-1.png" width="250" />
-  </a>
+    <br /><br />
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="allnodes/images/jito-dark-mode.png">
+      <img alt="Jito Allnodes Edition" src="allnodes/images/jito-light-mode.png" style="width: 16em">
+    </picture>
 </p>
 
-[![Build status](https://badge.buildkite.com/3a7c88c0f777e1a0fddacc190823565271ae4c251ef78d83a8.svg)](https://buildkite.com/jito/jito-solana)
+# Jito's fork of the Solana validator with modifications from Allnodes
 
-# About
+## Modifications made by Allnodes
 
-This repository contains Jito's fork of the Solana validator.
+This repository features the following enhancements to the Jito-Solana codebase:
 
-We recommend checking out our [Gitbook](https://jito-foundation.gitbook.io/mev/jito-solana/building-the-software) for
-more detailed instructions on building and running Jito-Solana.
+### 1. Fast snapshot distribution
 
----
+✅ Only on [Allnodes Bare-Metal Servers](https://www.allnodes.com/hosting)
 
-## **1. Install rustc, cargo and rustfmt.**
+Our infrastructure includes modifications that improve default snapshot downloading, which combined with
+ultra-high-speed channels deliver ultra-fast snapshot downloads. This dramatically reduces the initial sync time for
+new validators and enables faster deployment and recovery scenarios. The use of snapshot-finder or any other 3rd party 
+download tools is no longer needed.
+
+### 2. Enhanced voting logic modifications
+
+✅ Only on [Allnodes Bare-Metal Servers](https://www.allnodes.com/hosting)
+
+Our validator implementation includes voting modifications developed by **Zantetsu | Shinobi Systems** that enhance the
+original voting logic.
+
+These modifications work by:
+
+- Taking the next votable slot that the original codebase identifies as potentially ready for voting
+- Applying additional criteria before casting the vote
+- Providing more sophisticated voting decision-making
+
+This enhancement improves validator consensus participation through more intelligent vote timing and slot evaluation.
+
+### 3. Automatic Performance Optimization for Proof-of-History
+
+✅ Only on [Allnodes Bare-Metal Servers](https://www.allnodes.com/hosting)
+
+Your Solana node will automatically select the fastest CPU core for Proof-of-History processing, maximizing performance
+out of the box.
+
+### 4. Hardware-optimized SHA256 patch
+
+Our validator implementation includes a third-party performance patch developed by **kagren**. It optimizes SHA256
+hashing operations using SHA-NI instructions available on modern AMD processors (Zen3, Zen4, and Zen5
+architectures). This enhancement significantly improves hashing performance for block verification and other
+cryptographic operations.
+
+## Building and running
+
+> [!NOTE]
+> We recommend checking out Jito's [Gitbook](https://jito-foundation.gitbook.io/mev/jito-solana/building-the-software) 
+> for more detailed instructions on building and running Jito-Solana.
+
+### 1. Install rustc, cargo and rustfmt
 
 ```bash
 $ curl https://sh.rustup.rs -sSf | sh
@@ -29,101 +70,97 @@ When building the master branch, please make sure you are using the latest stabl
 $ rustup update
 ```
 
-When building a specific release branch, you should check the rust version in `ci/rust-version.sh` and if necessary,
-install that version by running:
-
-```bash
-$ rustup install VERSION
-```
-
-Note that if this is not the latest rust version on your machine, cargo commands may require
-an [override](https://rust-lang.github.io/rustup/overrides.html) in order to use the correct version.
-
 On Linux systems you may need to install libssl-dev, pkg-config, zlib1g-dev, protobuf etc.
 
 On Ubuntu:
 
 ```bash
 $ sudo apt-get update
-$ sudo apt-get install libssl-dev libudev-dev pkg-config zlib1g-dev llvm clang cmake make libprotobuf-dev protobuf-compiler libclang-dev
+$ sudo apt-get install libssl-dev libudev-dev pkg-config zlib1g-dev llvm clang cmake make libprotobuf-dev protobuf-compiler libclang-dev curl git
 ```
 
 On Fedora:
 
 ```bash
-$ sudo dnf install openssl-devel systemd-devel pkg-config zlib-devel llvm clang cmake make protobuf-devel protobuf-compiler perl-core libclang-dev
+$ sudo dnf install openssl-devel systemd-devel pkg-config zlib-devel llvm clang cmake make protobuf-devel protobuf-compiler perl-core libclang-dev curl git
 ```
 
-## **2. Download the source code.**
+### 2. Download the source code
+
+To download the source code, run (substitute `<version>` with the version tag you want to build):
 
 ```bash
-$ git clone https://github.com/jito-foundation/jito-solana.git
-$ cd jito-solana
+$ git clone --recursive https://github.com/allnodes/solana-jito --branch <version>
+$ cd solana-jito
 ```
 
-## **3. Build.**
+### 3. Release build
 
 ```bash
-$ ./cargo build
+$ ./cargo build --release
 ```
 
-> [!NOTE]
-> Note that this builds a debug version that is **not suitable for running a testnet or mainnet validator**. Please read [`docs/src/cli/install.md`](docs/src/cli/install.md#build-from-source) for instructions to build a release version for test and production uses.
+### 4. Voting mod configuration
 
-# Testing
+Voting mod (also known as "mostly confirmed threshold" voting patch) is enabled by default and comes with a predefined 
+configuration which should work for most users. If you wish to use a custom configuration:
 
-**Run the test suite:**
+1. create a configuration file (default filename is `mostly_confirmed_threshold` located in the current directory from 
+   where you run the validator). Values in this example are defaults, their meanings will be explained in the next 
+   section:
 
 ```bash
-$ ./cargo test
+echo '0.45 4 0 24' > ./mostly_confirmed_threshold
 ```
 
-### Starting a local testnet
+2. optionally, you can provide a different filename and/or path for the config file using the 
+  `--mostly-confirmed-threshold-config <path/to/config/file>` argument.
 
-Start your own testnet locally, instructions are in the [online docs](https://docs.anza.xyz/clusters/benchmark).
+> In order to disable the voting mod, you need to add the `--disable-mostly-confirmed-threshold` flag to the validator
+command.
 
-### Accessing the remote development cluster
+## Mostly confirmed threshold configuration file format:
 
-* `devnet` - stable public cluster for development accessible via
-devnet.solana.com. Runs 24/7. Learn more about the [public clusters](https://docs.anza.xyz/clusters)
+The `mostly_confirmed_threshold` file contains a simple whitespace-separated list of four values:
 
-# Benchmarking
-
-First, install the nightly build of rustc. `cargo bench` requires the use of the
-unstable features only available in the nightly build.
-
-```bash
-$ rustup install nightly
+```
+a b c d
 ```
 
-Run the benchmarks:
+### Parameters
 
-```bash
-$ cargo +nightly bench
+#### *a* (float) - vote weight threshold
+The minimum vote weight threshold required before voting on a slot. Slots that haven't achieved this vote weight will 
+not be voted on, except for:
+
+- Slots within the "vote ahead of threshold" region
+- When the escape hatch distance has been reached
+
+#### *b* (integer) - vote ahead of threshold
+The number of slots ahead of the threshold slot to vote on, regardless of vote weight. This parameter reduces vote 
+latency by allowing voting on recent slots even if they haven't met the threshold.
+
+#### *c* (integer) - skip recovery mode
+Controls the stake-weighted vote percentage required on a slot after skips have occurred. Must be one of:
+
+- `0` - No restriction
+- `1` - Slot after a skip must have `mostly_confirmed_threshold` before voting
+- `2` - Slot after a skip must be confirmed before voting
+
+#### *d* (integer) - escape hatch distance
+The maximum number of slots to wait without voting while waiting for the threshold to be met. After this many slots of non-voting, the validator will vote anyway.
+
+**Purpose**: This escape hatch prevents network deadlock by ensuring progress even when the threshold isn't being achieved. Without this mechanism, if multiple forks occur simultaneously and all have less than the threshold vote weight, validators could become stuck waiting indefinitely.
+
+### Default values
+
+When the configuration file is absent, the following default values are used:
+
+```
+0.45 4 0 24
 ```
 
-# Release Process
-
-The release process for this project is described [here](RELEASE.md).
-
-# Code coverage
-
-To generate code coverage statistics:
-
-```bash
-$ scripts/coverage.sh
-$ open target/cov/lcov-local/index.html
-```
-
-Why coverage? While most see coverage as a code quality metric, we see it primarily as a developer
-productivity metric. When a developer makes a change to the codebase, presumably it's a *solution* to
-some problem. Our unit-test suite is how we encode the set of *problems* the codebase solves. Running
-the test suite should indicate that your change didn't *infringe* on anyone else's solutions. Adding a
-test *protects* your solution from future changes. Say you don't understand why a line of code exists,
-try deleting it and running the unit-tests. The nearest test failure should tell you what problem
-was solved by that code. If no test fails, go ahead and submit a Pull Request that asks, "what
-problem is solved by this code?" On the other hand, if a test does fail and you can think of a
-better way to solve the same problem, a Pull Request with your solution would most certainly be
-welcome! Likewise, if rewriting a test can better communicate what code it's protecting, please
-send us that patch!
-
+- Threshold: 45% vote weight
+- Vote ahead: 4 slots
+- Skip recovery: No restriction
+- Escape hatch: 24 slots

@@ -1,0 +1,17 @@
+[package]
+name = "allnodes-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+allnodes-service-protos = { workspace = true }
+bincode = { workspace = true }
+hex = { workspace = true }
+log = { workspace = true }
+mid = "4.0.0"
+parking_lot = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+
+[lints]
+workspace = true
