@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-client"
-version = "3.1.2"
+version = "3.1.3"
 dependencies = [
  "allnodes-service-protos",
  "bincode",
@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-service-protos"
-version = "3.1.2"
+version = "3.1.3"
 dependencies = [
  "borsh",
  "prost",
@@ -700,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-solana"
-version = "3.1.2"
+version = "3.1.3"
 dependencies = [
  "allnodes-service-protos",
  "core_affinity",
