@@ -97,16 +97,20 @@ pub const MAX_ENTRY_RECV_PER_ITER: usize = 512;
 pub const SUPERMINORITY_THRESHOLD: f64 = 1f64 / 3f64;
 pub const MAX_UNCONFIRMED_SLOTS: usize = 5;
 pub const DUPLICATE_LIVENESS_THRESHOLD: f64 = 0.1;
-pub const DUPLICATE_THRESHOLD: f64 = 1.0 - SWITCH_FORK_THRESHOLD - DUPLICATE_LIVENESS_THRESHOLD;
+allnodes_client::constants! {
+pub const DUPLICATE_THRESHOLD: f64 = 1.0 - *SWITCH_FORK_THRESHOLD - DUPLICATE_LIVENESS_THRESHOLD;
+}
 
 const MAX_VOTE_SIGNATURES: usize = 200;
 const MAX_VOTE_REFRESH_INTERVAL_MILLIS: usize = 5000;
 const MAX_REPAIR_RETRY_LOOP_ATTEMPTS: usize = 10;
 
-#[cfg(test)]
-static_assertions::const_assert!(REFRESH_VOTE_BLOCKHEIGHT < solana_clock::MAX_PROCESSING_AGE);
+// #[cfg(test)]
+// static_assertions::const_assert!(REFRESH_VOTE_BLOCKHEIGHT < solana_clock::MAX_PROCESSING_AGE);
+allnodes_client::constants! {
 // Give at least 4 leaders the chance to pack our vote
 const REFRESH_VOTE_BLOCKHEIGHT: usize = 16;
+}
 #[derive(PartialEq, Eq, Debug)]
 pub enum HeaviestForkFailures {
     LockedOut(u64),
@@ -573,6 +577,7 @@ impl ReplayStage {
         config: ReplayStageConfig,
         senders: ReplaySenders,
         receivers: ReplayReceivers,
+        mut voting_patch: crate::allnodes::VotingPatch,
     ) -> Result<Self, String> {
         let ReplayStageConfig {
             vote_account,
@@ -947,6 +952,11 @@ impl ReplayStage {
                             &bank_forks,
                         );
 
+                        let mostly_confirmed_slots = voting_patch.populate_mostly_confirmed_slots(
+                            &progress,
+                            &bank_forks,
+                            fork_stats,
+                        );
                         Self::mark_slots_duplicate_confirmed(
                             &duplicate_confirmed_forks,
                             &blockstore,
@@ -960,6 +970,10 @@ impl ReplayStage {
                             &mut purge_repair_slot_counter,
                             &mut tbft_structs.duplicate_confirmed_slots,
                         );
+                        for slot in mostly_confirmed_slots {
+                            let slot_progress = progress.get_mut(&slot).unwrap();
+                            slot_progress.fork_stats.is_mostly_confirmed = true;
+                        }
                     }
                     compute_slot_stats_time.stop();
 
@@ -1025,6 +1039,7 @@ impl ReplayStage {
                     }
                     heaviest_fork_failures_time.stop();
 
+                    voting_patch.update_config();
                     let mut voting_time = Measure::start("voting_time");
                     // Vote on a fork
                     if let Some((ref vote_bank, ref switch_fork_decision)) = vote_bank {
@@ -1039,31 +1054,57 @@ impl ReplayStage {
                             );
                         }
 
-                        Self::handle_votable_bank(
-                            vote_bank,
-                            switch_fork_decision,
-                            &bank_forks,
-                            &mut tower,
-                            &mut progress,
-                            &vote_account,
-                            &identity_keypair,
-                            &authorized_voter_keypairs.read().unwrap(),
-                            &blockstore,
-                            &leader_schedule_cache,
-                            &lockouts_sender,
-                            snapshot_controller.as_deref(),
-                            rpc_subscriptions.as_deref(),
-                            &block_commitment_cache,
-                            &bank_notification_sender,
-                            &mut tracked_vote_transactions,
-                            &mut has_new_vote_been_rooted,
-                            &mut replay_timing,
-                            &voting_sender,
-                            &drop_bank_sender,
-                            wait_to_vote_slot,
-                            &mut first_alpenglow_slot,
-                            &mut tbft_structs,
-                        );
+                        let (vote_banks, pop_expired) = voting_patch
+                            .populate_vote_banks(&mut tower, vote_bank, &progress, &ancestors);
+
+                        if !vote_banks.is_empty() {
+                            for bank in vote_banks.iter() {
+                                Self::handle_votable_bank(
+                                    bank,
+                                    &bank_forks,
+                                    &mut tower,
+                                    &mut progress,
+                                    &vote_account,
+                                    &identity_keypair,
+                                    &blockstore,
+                                    &leader_schedule_cache,
+                                    &lockouts_sender,
+                                    snapshot_controller.as_deref(),
+                                    rpc_subscriptions.as_deref(),
+                                    &block_commitment_cache,
+                                    &bank_notification_sender,
+                                    &mut tracked_vote_transactions,
+                                    &mut has_new_vote_been_rooted,
+                                    &mut replay_timing,
+                                    &drop_bank_sender,
+                                    &mut first_alpenglow_slot,
+                                    &mut tbft_structs,
+                                    pop_expired,
+                                );
+                            }
+
+                            info!(
+                                "voting for window: {:?}",
+                                vote_banks
+                                    .iter()
+                                    .map(|bank| bank.slot())
+                                    .collect::<Vec<_>>()
+                            );
+
+                            Self::push_vote(
+                                vote_banks.last().unwrap(),
+                                &vote_account,
+                                &identity_keypair,
+                                &authorized_voter_keypairs.read().unwrap(),
+                                &mut tower,
+                                switch_fork_decision,
+                                &mut tracked_vote_transactions,
+                                has_new_vote_been_rooted,
+                                &mut replay_timing,
+                                &voting_sender,
+                                wait_to_vote_slot,
+                            );
+                        }
                     }
                     voting_time.stop();
 
@@ -2452,13 +2493,11 @@ impl ReplayStage {
     #[allow(clippy::too_many_arguments)]
     fn handle_votable_bank(
         bank: &Arc<Bank>,
-        switch_fork_decision: &SwitchForkDecision,
         bank_forks: &Arc<RwLock<BankForks>>,
         tower: &mut Tower,
         progress: &mut ProgressMap,
         vote_account_pubkey: &Pubkey,
         identity_keypair: &Keypair,
-        authorized_voter_keypairs: &[Arc<Keypair>],
         blockstore: &Blockstore,
         leader_schedule_cache: &Arc<LeaderScheduleCache>,
         lockouts_sender: &Sender<CommitmentAggregationData>,
@@ -2469,17 +2508,16 @@ impl ReplayStage {
         tracked_vote_transactions: &mut Vec<TrackedVoteTransaction>,
         has_new_vote_been_rooted: &mut bool,
         replay_timing: &mut ReplayLoopTiming,
-        voting_sender: &Sender<VoteOp>,
         drop_bank_sender: &Sender<Vec<BankWithScheduler>>,
-        wait_to_vote_slot: Option<Slot>,
         first_alpenglow_slot: &mut Option<Slot>,
         tbft_structs: &mut TowerBFTStructures,
+        pop_expired: bool,
     ) {
         if bank.is_empty() {
             datapoint_info!("replay_stage-voted_empty_bank", ("slot", bank.slot(), i64));
         }
         trace!("handle votable bank {}", bank.slot());
-        let new_root = tower.record_bank_vote(bank);
+        let new_root = tower.record_bank_vote(bank, pop_expired);
 
         if let Some(new_root) = new_root {
             if first_alpenglow_slot.is_none() {
@@ -2548,20 +2586,6 @@ impl ReplayStage {
         );
         update_commitment_cache_time.stop();
         replay_timing.update_commitment_cache_us += update_commitment_cache_time.as_us();
-
-        Self::push_vote(
-            bank,
-            vote_account_pubkey,
-            identity_keypair,
-            authorized_voter_keypairs,
-            tower,
-            switch_fork_decision,
-            tracked_vote_transactions,
-            *has_new_vote_been_rooted,
-            replay_timing,
-            voting_sender,
-            wait_to_vote_slot,
-        );
     }
 
     fn generate_vote_tx(
@@ -2747,7 +2771,7 @@ impl ReplayStage {
 
         if last_vote_tx_blockhash.is_some()
             && heaviest_bank_on_same_fork
-                .is_hash_valid_for_age(&last_vote_tx_blockhash.unwrap(), REFRESH_VOTE_BLOCKHEIGHT)
+                .is_hash_valid_for_age(&last_vote_tx_blockhash.unwrap(), *REFRESH_VOTE_BLOCKHEIGHT)
         {
             // Check the blockhash queue to see if enough blocks have been built on our last voted fork
             return false;
@@ -6874,7 +6898,7 @@ pub(crate) mod tests {
         assert_eq!(reset_fork.unwrap(), 4);
 
         // Record the vote for 5 which is not on the heaviest fork.
-        tower.record_bank_vote(&bank_forks.read().unwrap().get(5).unwrap());
+        tower.record_bank_vote(&bank_forks.read().unwrap().get(5).unwrap(), true);
 
         // 4 should be the heaviest slot, but should not be votable
         // because of lockout. 5 is the heaviest slot on the same fork as the last vote.
@@ -7100,7 +7124,7 @@ pub(crate) mod tests {
         assert_eq!(reset_fork.unwrap(), 4);
 
         // Record the vote for 4
-        tower.record_bank_vote(&bank_forks.read().unwrap().get(4).unwrap());
+        tower.record_bank_vote(&bank_forks.read().unwrap().get(4).unwrap(), true);
 
         // Mark 4 as duplicate, 3 should be the heaviest slot, but should not be votable
         // because of lockout
@@ -7337,7 +7361,7 @@ pub(crate) mod tests {
             ..
         } = vote_simulator;
 
-        tower.record_bank_vote(&bank_forks.read().unwrap().get(first_vote).unwrap());
+        tower.record_bank_vote(&bank_forks.read().unwrap().get(first_vote).unwrap(), true);
 
         // Simulate another version of slot 2 was duplicate confirmed
         let our_bank2_hash = bank_forks.read().unwrap().bank_hash(2).unwrap();
@@ -7773,7 +7797,7 @@ pub(crate) mod tests {
                 0,
             ),
         );
-        tower.record_bank_vote(&bank0);
+        tower.record_bank_vote(&bank0, true);
         ReplayStage::push_vote(
             &bank0,
             &my_vote_pubkey,
@@ -7878,7 +7902,7 @@ pub(crate) mod tests {
 
         // Simulate submitting a new vote for bank 1 to the network, but the vote
         // not landing
-        tower.record_bank_vote(&bank1);
+        tower.record_bank_vote(&bank1, true);
         ReplayStage::push_vote(
             &bank1,
             &my_vote_pubkey,
@@ -7966,7 +7990,7 @@ pub(crate) mod tests {
         // Create a bank where the last vote transaction will have expired
         let expired_bank = {
             let mut parent_bank = bank2.clone();
-            for _ in 0..REFRESH_VOTE_BLOCKHEIGHT {
+            for _ in 0..*REFRESH_VOTE_BLOCKHEIGHT {
                 let slot = parent_bank.slot() + 1;
                 parent_bank = Bank::new_from_parent_with_bank_forks(
                     bank_forks.as_ref(),
@@ -8149,7 +8173,7 @@ pub(crate) mod tests {
         progress: &mut ProgressMap,
     ) -> Arc<Bank> {
         let my_vote_pubkey = &my_vote_keypair[0].pubkey();
-        tower.record_bank_vote(&parent_bank);
+        tower.record_bank_vote(&parent_bank, true);
         ReplayStage::push_vote(
             &parent_bank,
             my_vote_pubkey,
@@ -9242,7 +9266,7 @@ pub(crate) mod tests {
         let tower =
             ReplayStage::load_tower(&tower_storage, &node_pubkey, &vote_account, &bank_forks)
                 .unwrap();
-        let expected_tower = Tower::new_for_tests(VOTE_THRESHOLD_DEPTH, VOTE_THRESHOLD_SIZE);
+        let expected_tower = Tower::new_for_tests(*VOTE_THRESHOLD_DEPTH, VOTE_THRESHOLD_SIZE);
         assert_eq!(tower.vote_state, expected_tower.vote_state);
         assert_eq!(tower.node_pubkey, node_pubkey);
     }

@@ -368,7 +368,7 @@ impl DefaultArgs {
             bind_address: "0.0.0.0".to_string(),
             ledger_path: "ledger".to_string(),
             dynamic_port_range: format!("{}-{}", VALIDATOR_PORT_RANGE.0, VALIDATOR_PORT_RANGE.1),
-            maximum_local_snapshot_age: "2500".to_string(),
+            maximum_local_snapshot_age: "500".to_string(),
             tower_storage: "file".to_string(),
             send_transaction_service_config: send_transaction_service::Config::default(),
             maximum_full_snapshot_archives_to_retain: DEFAULT_MAX_FULL_SNAPSHOT_ARCHIVES_TO_RETAIN
