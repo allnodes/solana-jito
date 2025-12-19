@@ -154,13 +154,13 @@ dependencies = [
  "agave-logger",
  "atty",
  "bincode",
- "bzip2",
  "chrono",
  "clap 2.33.3",
  "console 0.16.1",
  "crossbeam-channel",
  "ctrlc",
  "dirs-next",
+ "flate2",
  "indicatif",
  "nix",
  "reqwest 0.12.24",
@@ -10778,12 +10778,10 @@ dependencies = [
 [[package]]
 name = "solana-sha256-hasher"
 version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db7dc3011ea4c0334aaaa7e7128cb390ecf546b28d412e9bf2064680f57f588f"
 dependencies = [
  "sha2 0.10.9",
- "solana-define-syscall 4.0.1",
- "solana-hash 4.0.1",
+ "solana-define-syscall 3.0.0",
+ "solana-hash 3.1.0",
 ]
 
 [[package]]
@@ -14439,7 +14437,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "solana-sha256-hasher"
-version = "3.0.0"
