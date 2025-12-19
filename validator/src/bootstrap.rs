@@ -548,6 +548,94 @@ fn get_vetted_rpc_nodes(
     }
 }
 
+fn allnodes_push_rpc_node_to_vetted(
+    node: allnodes_service_protos::BootstrapSnapshotNode,
+    shred_version: u16,
+    rpc_bootstrap_config: &RpcBootstrapConfig,
+    vetted_rpc_nodes: &mut Vec<(ContactInfo, Option<SnapshotHash>, RpcClient)>,
+    blacklisted_rpc_nodes: &HashSet<Pubkey>,
+) {
+    if blacklisted_rpc_nodes.contains(&node.pubkey) {
+        warn!(
+            "Skipping RPC node that is blacklisted: {}, will use standard algorithm",
+            node.pubkey,
+        );
+        return;
+    }
+    debug!("Using RPC node returned by Allnodes service: {}", node.rpc);
+    let mut contact_info = ContactInfo::new(node.pubkey, 0, shred_version);
+    contact_info
+        .set_rpc(node.rpc)
+        .inspect_err(|err| warn!("Failed to set RPC address for RPC node: {err}"))
+        .ok();
+    let snapshot_hash_opt =
+        std::ops::Not::not(rpc_bootstrap_config.no_snapshot_fetch).then_some(SnapshotHash {
+            full: node.snapshot_hash.full,
+            incr: Some(node.snapshot_hash.incr),
+        });
+    vetted_rpc_nodes.push((
+        contact_info,
+        snapshot_hash_opt,
+        RpcClient::new_socket_with_timeout(node.rpc, Duration::from_secs(5)),
+    ));
+}
+
+fn allnodes_poh_resolve_cpu_core(
+    shred_version: u16,
+    store_paths: &[std::path::PathBuf],
+) -> Option<usize> {
+    let cpu_info = allnodes_solana::read_cpu_info()?;
+    let isolated = allnodes_solana::read_isolated();
+
+    let (cpuid, cores) = allnodes_client::poh_process_core_config(shred_version, &cpu_info)?;
+
+    let filename = format!("poh-{cpuid:016x}.bin");
+    let saved = store_paths
+        .iter()
+        .map(|path| std::fs::read(path.join(&filename)).ok())
+        .find(Option::is_some)
+        .flatten()
+        .and_then(|bytes| allnodes_solana::decode_benchmark_results(&bytes))
+        .filter(|bench| !bench.cores.is_empty() && bench.cores.len() == cores.len());
+    let benchmark = match saved {
+        Some(saved) => saved,
+        None => {
+            info!("Running PoH benchmark on {} cores...", cores.len());
+            let results = allnodes_solana::test_cores(cores)?;
+            let encoded = allnodes_solana::encode_benchmark_results(&results);
+            for path in store_paths {
+                if std::fs::write(path.join(&filename), &encoded).is_ok() {
+                    break;
+                }
+            }
+            if let Some((best_vcore_id, best_score)) = results
+                .cores
+                .iter()
+                .max_by_key(|core| core.score.unwrap_or_default())
+                .map(|core| (&core.vcore_ids[0], core.score.unwrap_or_default()))
+            {
+                info!(
+                    "Benchmarking completed. Found fastest core #{best_vcore_id} with \
+                     {best_score} hashes/s."
+                );
+            }
+            results
+        }
+    };
+
+    allnodes_client::poh_resolve_cpu_core(shred_version, &benchmark, isolated.as_ref()).map(
+        |(core_id, message)| {
+            info!("Core #{core_id} will be pinned for Proof-of-History processing");
+            if let Some(message) = message {
+                logger().flush();
+                println!("{message}")
+            }
+
+            core_id
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn rpc_bootstrap(
     node: &Node,
@@ -582,6 +670,32 @@ pub fn rpc_bootstrap(
         }
     }
 
+    let expected_shred_version = validator_config
+        .expected_shred_version
+        .expect("expected_shred_version should not be None");
+
+    let mut client_store_paths = vec![ledger_path.to_path_buf()];
+    if let Some(path) = &validator_config.identity_path {
+        if let Some(dir) = path.parent() {
+            client_store_paths.insert(0, dir.to_path_buf());
+        }
+    }
+
+    allnodes_client::CONSTANTS.load(client_store_paths.clone());
+
+    if validator_config.poh_pinned_cpu_core.is_none() {
+        validator_config.poh_pinned_cpu_core =
+            allnodes_poh_resolve_cpu_core(expected_shred_version, &client_store_paths);
+    }
+
+    let (mut snapshot_node, flags) = allnodes_client::get_bootstrap_info(expected_shred_version);
+
+    if flags.is_some() {
+        validator_config.voting_patch_flags = flags;
+    }
+
+    allnodes_client::run_heartbeat_sender(expected_shred_version);
+
     if bootstrap_config.no_genesis_fetch && bootstrap_config.no_snapshot_fetch {
         return;
     }
@@ -590,41 +704,63 @@ pub fn rpc_bootstrap(
     let mut get_rpc_nodes_time = Duration::new(0, 0);
     let mut snapshot_download_time = Duration::new(0, 0);
     let mut blacklisted_rpc_nodes = HashSet::new();
-    let mut gossip = None;
+    let mut gossip: Option<(Arc<ClusterInfo>, Arc<AtomicBool>, GossipService)> = None;
     let mut vetted_rpc_nodes = vec![];
     let mut download_abort_count = 0;
+    let mut allnodes_resolver_attempts_left = 3_usize;
     loop {
-        if gossip.is_none() {
-            *start_progress.write().unwrap() = ValidatorStartProgress::SearchingForRpcService;
+        if allnodes_resolver_attempts_left > 0 {
+            allnodes_resolver_attempts_left = allnodes_resolver_attempts_left.saturating_sub(1);
 
-            gossip = Some(start_gossip_node(
-                identity_keypair.clone(),
-                cluster_entrypoints,
-                ledger_path,
-                &node
-                    .info
-                    .gossip()
-                    .expect("Operator must spin up node with valid gossip address"),
-                node.sockets.gossip.clone(),
-                validator_config
-                    .expected_shred_version
-                    .expect("expected_shred_version should not be None"),
-                validator_config.gossip_validators.clone(),
-                should_check_duplicate_instance,
-                socket_addr_space,
-            ));
+            if let Some(snapshot_node) = snapshot_node
+                .take()
+                .filter(|node| !blacklisted_rpc_nodes.contains(&node.pubkey))
+                .or_else(|| allnodes_client::get_bootstrap_info(expected_shred_version).0)
+            {
+                allnodes_push_rpc_node_to_vetted(
+                    snapshot_node,
+                    expected_shred_version,
+                    &bootstrap_config,
+                    &mut vetted_rpc_nodes,
+                    &blacklisted_rpc_nodes,
+                );
+            }
+
+            if vetted_rpc_nodes.is_empty() {
+                continue;
+            }
+        } else {
+            if gossip.is_none() {
+                *start_progress.write().unwrap() = ValidatorStartProgress::SearchingForRpcService;
+
+                gossip = Some(start_gossip_node(
+                    identity_keypair.clone(),
+                    cluster_entrypoints,
+                    ledger_path,
+                    &node
+                        .info
+                        .gossip()
+                        .expect("Operator must spin up node with valid gossip address"),
+                    node.sockets.gossip.clone(),
+                    expected_shred_version,
+                    validator_config.gossip_validators.clone(),
+                    should_check_duplicate_instance,
+                    socket_addr_space,
+                ));
+            }
+
+            let get_rpc_nodes_start = Instant::now();
+            get_vetted_rpc_nodes(
+                &mut vetted_rpc_nodes,
+                &gossip.as_ref().unwrap().0,
+                validator_config,
+                &mut blacklisted_rpc_nodes,
+                &bootstrap_config,
+            );
+            get_rpc_nodes_time += get_rpc_nodes_start.elapsed();
         }
 
-        let get_rpc_nodes_start = Instant::now();
-        get_vetted_rpc_nodes(
-            &mut vetted_rpc_nodes,
-            &gossip.as_ref().unwrap().0,
-            validator_config,
-            &mut blacklisted_rpc_nodes,
-            &bootstrap_config,
-        );
         let (rpc_contact_info, snapshot_hash, rpc_client) = vetted_rpc_nodes.pop().unwrap();
-        get_rpc_nodes_time += get_rpc_nodes_start.elapsed();
 
         let snapshot_download_start = Instant::now();
         let download_result = attempt_download_genesis_and_snapshot(
@@ -1228,6 +1364,13 @@ fn download_snapshot(
         desired_snapshot_hash.0,
         agave_snapshots::snapshot_hash::SnapshotHash(desired_snapshot_hash.1),
     );
+    info!(
+        "Trying to download snapshots from: {} ({})",
+        rpc_contact_info
+            .rpc()
+            .ok_or_else(|| String::from("Invalid RPC address"))?,
+        rpc_contact_info.pubkey(),
+    );
     download_snapshot_archive(
         &rpc_contact_info
             .rpc()
@@ -1240,7 +1383,6 @@ fn download_snapshot(
         maximum_incremental_snapshot_archives_to_retain,
         use_progress_bar,
         &mut Some(Box::new(|download_progress: &DownloadProgressRecord| {
-            debug!("Download progress: {download_progress:?}");
             if download_progress.last_throughput < minimal_snapshot_download_speed
                 && download_progress.notification_count <= 1
                 && download_progress.percentage_done <= 2_f32
