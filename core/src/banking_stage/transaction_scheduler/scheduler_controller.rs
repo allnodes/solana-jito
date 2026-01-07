@@ -103,7 +103,7 @@ where
             decision_maker,
             receive_and_buffer,
             bank_forks,
-            container: R::Container::with_capacity(TOTAL_BUFFERED_PACKETS),
+            container: R::Container::with_capacity(*TOTAL_BUFFERED_PACKETS),
             scheduler,
             count_metrics: SchedulerCountMetrics::default(),
             timing_metrics: SchedulerTimingMetrics::default(),

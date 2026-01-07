@@ -384,6 +384,7 @@ impl RpcSender for MockSender {
                 value: json!(Some(0)),
             })?,
             "getClusterNodes" => serde_json::to_value(vec![RpcContactInfo {
+                client_id: None,
                 pubkey: PUBKEY.to_string(),
                 gossip: Some(SocketAddr::from(([10, 239, 6, 48], 8899))),
                 tvu: Some(SocketAddr::from(([10, 239, 6, 48], 8865))),

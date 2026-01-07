@@ -42,7 +42,7 @@ use {
     solana_signer::Signer,
     solana_streamer::socket::SocketAddrSpace,
     solana_turbine::broadcast_stage::BroadcastStageType,
-    static_assertions,
+    // static_assertions,
     std::{
         collections::HashSet,
         fs, iter,
@@ -199,7 +199,7 @@ pub fn run_kill_partition_switch_threshold<C>(
 ) {
     // Needs to be at least 1/3 or there will be no overlap
     // with the confirmation supermajority 2/3
-    static_assertions::const_assert!(SWITCH_FORK_THRESHOLD >= 1f64 / 3f64);
+    assert!(*SWITCH_FORK_THRESHOLD >= 1f64 / 3f64);
     info!("stakes_to_kill: {stakes_to_kill:?}, alive_stakes: {alive_stakes:?}");
 
     // This test:

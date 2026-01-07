@@ -41,6 +41,7 @@ use {
     },
 };
 
+allnodes_client::constants! {
 const CLIENT_CHANNEL_BUFFER: usize = 1 << 14;
 const ROUTER_CHANNEL_BUFFER: usize = 64;
 const CONNECTION_CACHE_CAPACITY: usize = 3072;
@@ -49,10 +50,11 @@ const ALPN_TURBINE_PROTOCOL_ID: &[u8] = b"solana-turbine";
 // Transport config.
 const DATAGRAM_RECEIVE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 const DATAGRAM_SEND_BUFFER_SIZE: usize = 128 * 1024 * 1024;
-const INITIAL_MAXIMUM_TRANSMISSION_UNIT: u16 = MINIMUM_MAXIMUM_TRANSMISSION_UNIT;
+const INITIAL_MAXIMUM_TRANSMISSION_UNIT: u16 = *MINIMUM_MAXIMUM_TRANSMISSION_UNIT;
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(4);
 const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const MINIMUM_MAXIMUM_TRANSMISSION_UNIT: u16 = 1280;
+}
 
 const CONNECTION_CLOSE_ERROR_CODE_SHUTDOWN: VarInt = VarInt::from_u32(1);
 const CONNECTION_CLOSE_ERROR_CODE_DROPPED: VarInt = VarInt::from_u32(2);
@@ -125,7 +127,7 @@ pub fn new_quic_endpoint(
     let prune_cache_pending = Arc::<AtomicBool>::default();
     let cache = Arc::<Mutex<HashMap<Pubkey, Connection>>>::default();
     let router = Arc::<AsyncRwLock<HashMap<SocketAddr, AsyncSender<Bytes>>>>::default();
-    let (client_sender, client_receiver) = tokio::sync::mpsc::channel(CLIENT_CHANNEL_BUFFER);
+    let (client_sender, client_receiver) = tokio::sync::mpsc::channel(*CLIENT_CHANNEL_BUFFER);
     let server_task = runtime.spawn(run_server(
         endpoint.clone(),
         sender.clone(),
@@ -184,17 +186,17 @@ fn new_client_config(
 }
 
 fn new_transport_config() -> TransportConfig {
-    let max_idle_timeout = IdleTimeout::try_from(MAX_IDLE_TIMEOUT).unwrap();
+    let max_idle_timeout = IdleTimeout::try_from(*MAX_IDLE_TIMEOUT).unwrap();
     let mut config = TransportConfig::default();
     config
-        .datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER_SIZE))
-        .datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_SIZE)
-        .initial_mtu(INITIAL_MAXIMUM_TRANSMISSION_UNIT)
-        .keep_alive_interval(Some(KEEP_ALIVE_INTERVAL))
+        .datagram_receive_buffer_size(Some(*DATAGRAM_RECEIVE_BUFFER_SIZE))
+        .datagram_send_buffer_size(*DATAGRAM_SEND_BUFFER_SIZE)
+        .initial_mtu(*INITIAL_MAXIMUM_TRANSMISSION_UNIT)
+        .keep_alive_interval(Some(*KEEP_ALIVE_INTERVAL))
         .max_concurrent_bidi_streams(VarInt::from(0u8))
         .max_concurrent_uni_streams(VarInt::from(0u8))
         .max_idle_timeout(Some(max_idle_timeout))
-        .min_mtu(MINIMUM_MAXIMUM_TRANSMISSION_UNIT)
+        .min_mtu(*MINIMUM_MAXIMUM_TRANSMISSION_UNIT)
         .mtu_discovery_config(None);
     config
 }
@@ -256,7 +258,7 @@ async fn run_client(
             let Some(bytes) = try_route_bytes(&remote_address, bytes, &router, &stats) else {
                 continue;
             };
-            let (sender, receiver) = tokio::sync::mpsc::channel(ROUTER_CHANNEL_BUFFER);
+            let (sender, receiver) = tokio::sync::mpsc::channel(*ROUTER_CHANNEL_BUFFER);
             sender.try_send(bytes).unwrap();
             router.insert(remote_address, sender);
             receiver
@@ -340,7 +342,7 @@ async fn handle_connecting(
     let remote_address = connection.remote_address();
     let remote_pubkey = get_remote_pubkey(&connection)?;
     let receiver = {
-        let (sender, receiver) = tokio::sync::mpsc::channel(ROUTER_CHANNEL_BUFFER);
+        let (sender, receiver) = tokio::sync::mpsc::channel(*ROUTER_CHANNEL_BUFFER);
         router.write().await.insert(remote_address, sender);
         receiver
     };
@@ -609,8 +611,8 @@ async fn prune_connection_cache(
             })
             .collect();
         connections
-            .select_nth_unstable_by_key(CONNECTION_CACHE_CAPACITY, |&(stake, _)| Reverse(stake));
-        for (_, (_, connection)) in &connections[CONNECTION_CACHE_CAPACITY..] {
+            .select_nth_unstable_by_key(*CONNECTION_CACHE_CAPACITY, |&(stake, _)| Reverse(stake));
+        for (_, (_, connection)) in &connections[*CONNECTION_CACHE_CAPACITY..] {
             connection.close(
                 CONNECTION_CLOSE_ERROR_CODE_PRUNED,
                 CONNECTION_CLOSE_REASON_PRUNED,
@@ -619,7 +621,7 @@ async fn prune_connection_cache(
         cache.extend(
             connections
                 .into_iter()
-                .take(CONNECTION_CACHE_CAPACITY)
+                .take(*CONNECTION_CACHE_CAPACITY)
                 .map(|(_, entry)| entry),
         );
         prune_cache_pending.store(false, Ordering::Relaxed);
