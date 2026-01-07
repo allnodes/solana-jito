@@ -85,7 +85,10 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
         .subcommand(commands::shred::shred_retransmit_receiver_command(
             default_args,
         ))
-        .subcommand(commands::runtime_plugin::command(default_args));
+        .subcommand(commands::runtime_plugin::command(default_args))
+        // Allnodes subcommands
+        .subcommand(commands::allnodes::enable_experimental_feature_command())
+        .subcommand(commands::allnodes::disable_experimental_feature_command());
 
     commands::run::add_args(app, default_args)
         .args(&thread_args(&default_args.thread_args))
@@ -344,7 +347,7 @@ impl DefaultArgs {
             bind_address: "0.0.0.0".to_string(),
             ledger_path: "ledger".to_string(),
             dynamic_port_range: format!("{}-{}", VALIDATOR_PORT_RANGE.0, VALIDATOR_PORT_RANGE.1),
-            maximum_local_snapshot_age: "2500".to_string(),
+            maximum_local_snapshot_age: "500".to_string(),
             genesis_archive_unpacked_size: MAX_GENESIS_ARCHIVE_UNPACKED_SIZE.to_string(),
             rpc_max_multiple_accounts: MAX_MULTIPLE_ACCOUNTS.to_string(),
             health_check_slot_distance: DELINQUENT_VALIDATOR_SLOT_DISTANCE.to_string(),
