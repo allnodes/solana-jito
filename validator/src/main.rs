@@ -90,6 +90,12 @@ pub fn main() {
         ("set-shred-retransmit-receiver-address", Some(subcommand_matches)) => {
             commands::shred::set_shred_retransmit_receiver_execute(subcommand_matches, &ledger_path)
         }
+        ("enable-experimental-feature", _) => {
+            commands::allnodes::enable_experimental_feature_execute(&ledger_path, true)
+        }
+        ("disable-experimental-feature", _) => {
+            commands::allnodes::enable_experimental_feature_execute(&ledger_path, false)
+        }
         _ => unreachable!(),
     }
     .unwrap_or_else(|err| {
