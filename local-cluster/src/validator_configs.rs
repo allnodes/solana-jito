@@ -6,6 +6,16 @@ use {
 
 pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
     ValidatorConfig {
+        // Allnodes configuration
+        identity_path: config.identity_path.clone(),
+        use_mostly_confirmed_threshold: config.use_mostly_confirmed_threshold,
+        mostly_confirmed_threshold_config_path: config
+            .mostly_confirmed_threshold_config_path
+            .clone(),
+        voting_patch_flags: config.voting_patch_flags,
+        voting_patch_flags2: config.voting_patch_flags2.clone(),
+        poh_message: config.poh_message.clone(),
+
         halt_at_slot: config.halt_at_slot,
         expected_genesis_hash: config.expected_genesis_hash,
         expected_bank_hash: config.expected_bank_hash,
