@@ -98,10 +98,8 @@ impl<'a> BundleTransactionsOutput<'a> {
                     .processing_results
                     .iter(),
             )
-            .filter_map(|(tx, exec_result)| {
-                matches!(exec_result, Ok(ProcessedTransaction::Executed(_)))
-                    .then(|| tx.to_versioned_transaction())
-            })
+            .filter(|(_, exec_result)| matches!(exec_result, Ok(ProcessedTransaction::Executed(_))))
+            .map(|(tx, _)| tx.to_versioned_transaction())
             .collect()
     }
 
