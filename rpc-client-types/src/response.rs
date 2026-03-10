@@ -293,6 +293,8 @@ pub enum ReceivedSignatureResult {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcContactInfo {
+    /// Client Id from version info
+    pub client_id: Option<u16>,
     /// Pubkey of the node as a base-58 string
     pub pubkey: String,
     /// Gossip port
