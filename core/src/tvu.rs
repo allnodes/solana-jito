@@ -228,6 +228,7 @@ impl Tvu {
         vote_connection_cache: Arc<ConnectionCache>,
         votor_init: AlpenglowInitializationState,
         shred_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
+        voting_patch: crate::allnodes::VotingPatch,
     ) -> Result<Self, String> {
         let migration_status = bank_forks.read().unwrap().migration_status();
 
@@ -557,7 +558,12 @@ impl Tvu {
 
         let drop_bank_service = DropBankService::new(drop_bank_receiver);
 
-        let replay_stage = ReplayStage::new(replay_stage_config, replay_senders, replay_receivers)?;
+        let replay_stage = ReplayStage::new(
+            replay_stage_config,
+            replay_senders,
+            replay_receivers,
+            voting_patch,
+        )?;
 
         let blockstore_cleanup_service = tvu_config.max_ledger_shreds.map(|max_ledger_shreds| {
             BlockstoreCleanupService::new(blockstore.clone(), max_ledger_shreds, exit.clone())
@@ -838,6 +844,7 @@ pub mod tests {
                 voting_service_test_override: None,
             },
             Arc::new(ArcSwap::from_pointee(ShredReceiverAddresses::new())),
+            crate::allnodes::VotingPatch::default(),
         )
         .expect("assume success");
         exit.store(true, Ordering::Relaxed);
