@@ -3671,15 +3671,20 @@ pub mod rpc_full {
                             .map(|addr| socket_addr_space.check(&addr))
                             .unwrap_or_default()
                     {
-                        let (version, feature_set) = if let Some(version) =
+                        let (version, feature_set, client_id) = if let Some(version) =
                             cluster_info.get_node_version(contact_info.pubkey())
                         {
                             let version = solana_version::v4::Version::from(version);
-                            (Some(version.to_string()), Some(version.feature_set()))
+                            (
+                                Some(version.to_string()),
+                                Some(version.feature_set()),
+                                u16::try_from(*version.client()).ok(),
+                            )
                         } else {
-                            (None, None)
+                            (None, None, None)
                         };
                         Some(RpcContactInfo {
+                            client_id,
                             pubkey: contact_info.pubkey().to_string(),
                             gossip: contact_info.gossip(),
                             tvu: contact_info

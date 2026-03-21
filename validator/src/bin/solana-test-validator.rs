@@ -431,6 +431,7 @@ fn main() {
     admin_rpc_service::run(
         &ledger_path,
         admin_rpc_service::AdminRpcRequestMetadata {
+            flags2: Arc::default(),
             rpc_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port)),
             start_progress: genesis.start_progress.clone(),
             start_time: std::time::SystemTime::now(),
