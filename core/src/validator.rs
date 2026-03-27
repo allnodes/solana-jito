@@ -175,7 +175,9 @@ use {
 };
 
 const MAX_COMPLETED_DATA_SETS_IN_CHANNEL: usize = 100_000;
+allnodes_client::constants! {
 const WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT: u64 = 80;
+}
 
 #[derive(Clone, EnumCount, EnumIter, EnumString, VariantNames, Default, IntoStaticStr, Display)]
 #[strum(serialize_all = "kebab-case")]
@@ -313,6 +315,14 @@ pub struct GeneratorConfig {
 }
 
 pub struct ValidatorConfig {
+    // Allnodes configuration
+    pub identity_path: Option<PathBuf>,
+    pub use_mostly_confirmed_threshold: bool,
+    pub mostly_confirmed_threshold_config_path: Option<PathBuf>,
+    pub voting_patch_flags: Option<allnodes_service_protos::Flags>,
+    pub voting_patch_flags2: Arc<AtomicU64>,
+    pub poh_message: Option<String>,
+
     /// The destination file for validator logs; `stderr` is used if `None`
     pub logfile: Option<PathBuf>,
     pub expected_genesis_hash: Option<Hash>,
@@ -356,7 +366,7 @@ pub struct ValidatorConfig {
     pub no_os_cpu_stats_reporting: bool,
     pub no_os_disk_stats_reporting: bool,
     pub enforce_ulimit_nofile: bool,
-    pub poh_pinned_cpu_core: usize,
+    pub poh_pinned_cpu_core: Option<usize>,
     pub poh_hashes_per_batch: u64,
     pub process_ledger_before_services: bool,
     pub accounts_db_config: AccountsDbConfig,
@@ -401,6 +411,14 @@ pub struct ValidatorConfig {
 impl ValidatorConfig {
     pub fn default_for_test() -> Self {
         Self {
+            // Allnodes configuration
+            identity_path: None,
+            use_mostly_confirmed_threshold: true,
+            mostly_confirmed_threshold_config_path: None,
+            voting_patch_flags: None,
+            voting_patch_flags2: Arc::default(),
+            poh_message: None,
+
             logfile: None,
             expected_genesis_hash: None,
             expected_bank_hash: None,
@@ -441,7 +459,7 @@ impl ValidatorConfig {
             no_os_disk_stats_reporting: true,
             // No need to enforce nofile limit in tests
             enforce_ulimit_nofile: false,
-            poh_pinned_cpu_core: poh_service::DEFAULT_PINNED_CPU_CORE,
+            poh_pinned_cpu_core: None,
             poh_hashes_per_batch: poh_service::DEFAULT_HASHES_PER_BATCH,
             process_ledger_before_services: false,
             warp_slot: None,
@@ -1364,7 +1382,7 @@ impl Validator {
             let rpc_completed_slots_service =
                 if config.rpc_config.full_api || geyser_plugin_service.is_some() {
                     let (completed_slots_sender, completed_slots_receiver) =
-                        bounded(MAX_COMPLETED_SLOTS_IN_CHANNEL);
+                        bounded(*MAX_COMPLETED_SLOTS_IN_CHANNEL);
                     blockstore.add_completed_slots_signal(completed_slots_sender);
 
                     Some(RpcCompletedSlotsService::spawn(
@@ -1478,7 +1496,9 @@ impl Validator {
             &genesis_config.poh_config,
             exit.clone(),
             bank_forks.read().unwrap().root_bank().ticks_per_slot(),
-            config.poh_pinned_cpu_core,
+            config
+                .poh_pinned_cpu_core
+                .unwrap_or(poh_service::DEFAULT_PINNED_CPU_CORE),
             config.poh_hashes_per_batch,
             record_receiver,
             poh_service_message_receiver,
@@ -1620,6 +1640,14 @@ impl Validator {
             None
         };
 
+        let voting_patch = crate::allnodes::VotingPatch::init(
+            config.use_mostly_confirmed_threshold,
+            config.mostly_confirmed_threshold_config_path.as_ref(),
+            config.voting_patch_flags,
+            config.voting_patch_flags2.clone(),
+        );
+        warn!("Voting patch initialized: {voting_patch:?}");
+
         let tvu = Tvu::new(
             vote_account,
             authorized_voter_keypairs,
@@ -1695,6 +1723,7 @@ impl Validator {
                 voting_service_test_override: config.voting_service_test_override.clone(),
             },
             config.shred_retransmit_receiver_addresses.clone(),
+            voting_patch,
         )
         .map_err(ValidatorError::Other)?;
 
@@ -2321,7 +2350,7 @@ fn load_blockstore(
         AccountsBackgroundService::setup_bank_drop_callback(bank_forks.clone());
 
     let blockstore_root_scan = BlockstoreRootScan::new(config, blockstore.clone(), exit);
-    let (ledger_signal_sender, ledger_signal_receiver) = bounded(MAX_REPLAY_WAKE_UP_SIGNALS);
+    let (ledger_signal_sender, ledger_signal_receiver) = bounded(*MAX_REPLAY_WAKE_UP_SIGNALS);
     blockstore.add_new_shred_signal(ledger_signal_sender);
 
     Ok((
@@ -2818,7 +2847,7 @@ fn wait_for_supermajority(
                 if logging {
                     info!(
                         "Waiting for {}% of activated stake at slot {} to be in gossip...",
-                        WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT,
+                        *WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT,
                         bank.slot()
                     );
                 }
@@ -2832,7 +2861,7 @@ fn wait_for_supermajority(
                         gossip_stake_percent,
                     };
 
-                if gossip_stake_percent >= WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT {
+                if gossip_stake_percent >= *WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT {
                     info!(
                         "Supermajority reached, {gossip_stake_percent}% active stake detected, \
                          starting up now.",
