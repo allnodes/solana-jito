@@ -26,6 +26,8 @@ frozen-abi = [
 agave-unstable-api = []
 
 [dependencies]
+allnodes-client = { workspace = true }
+
 agave-feature-set = { workspace = true }
 agave-reserved-account-keys = { workspace = true }
 agave-snapshots = { workspace = true }

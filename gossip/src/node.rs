@@ -365,7 +365,7 @@ impl Node {
             rpc_sts_client,
             vortexor_receivers,
         };
-        info!("Bound all network sockets as follows: {:#?}", &sockets);
+        // info!("Bound all network sockets as follows: {:#?}", &sockets);
         Node {
             info,
             sockets,
