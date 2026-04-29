@@ -174,9 +174,12 @@ impl Tvu {
         cluster_slots: Arc<ClusterSlots>,
         wen_restart_repair_slots: Option<Arc<RwLock<Vec<Slot>>>>,
         slot_status_notifier: Option<SlotStatusNotifier>,
-        vote_connection_cache: Arc<ConnectionCache>,
+        vote_primary_cache: Arc<ConnectionCache>,
+        vote_secondary_cache: Arc<ConnectionCache>,
+        vote_use_secondary: bool,
         shred_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
         bam_shred_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
+        voting_patch: crate::allnodes::VotingPatch,
     ) -> Result<Self, String> {
         let in_wen_restart = wen_restart_repair_slots.is_some();
 
@@ -360,14 +363,16 @@ impl Tvu {
             cluster_info.clone(),
             poh_recorder.clone(),
             tower_storage,
-            vote_connection_cache.clone(),
+            vote_primary_cache,
+            vote_secondary_cache.clone(),
+            vote_use_secondary,
             alpenglow_socket,
             bank_forks.clone(),
         );
 
         let warm_quic_cache_service = create_cache_warmer_if_needed(
             connection_cache,
-            vote_connection_cache,
+            vote_secondary_cache,
             cluster_info,
             poh_recorder,
             &exit,
@@ -384,6 +389,7 @@ impl Tvu {
                 replay_stage_config,
                 replay_senders,
                 replay_receivers,
+                voting_patch,
             )?)
         };
 
@@ -622,8 +628,14 @@ pub mod tests {
             wen_restart_repair_slots,
             None,
             Arc::new(connection_cache),
+            Arc::new(ConnectionCache::new_quic(
+                "connection_cache_quic_vote_test",
+                DEFAULT_TPU_CONNECTION_POOL_SIZE,
+            )),
+            false,
             Arc::new(ArcSwap::from_pointee(ShredReceiverAddresses::new())),
             Arc::default(),
+            crate::allnodes::VotingPatch::default(),
         )
         .expect("assume success");
         if enable_wen_restart {

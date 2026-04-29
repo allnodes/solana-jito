@@ -38,6 +38,12 @@ pub fn main() {
         )
         .inspect_err(|err| error!("Failed to start validator: {err}"))
         .map_err(commands::Error::Dynamic),
+        ("enable-experimental-feature", _) => {
+            commands::allnodes::enable_experimental_feature_execute(&ledger_path, true)
+        }
+        ("disable-experimental-feature", _) => {
+            commands::allnodes::enable_experimental_feature_execute(&ledger_path, false)
+        }
         ("authorized-voter", Some(authorized_voter_subcommand_matches)) => {
             commands::authorized_voter::execute(authorized_voter_subcommand_matches, &ledger_path)
         }
