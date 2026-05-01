@@ -146,9 +146,9 @@ impl PohService {
                     // PoH service runs in a tight loop, generating hashes as fast as possible.
                     // Let's dedicate one of the CPU cores to this thread so that it can gain
                     // from cache performance.
-                    if let Some(cores) = core_affinity::get_core_ids() {
-                        core_affinity::set_for_current(cores[pinned_cpu_core]);
-                    }
+                    core_affinity::set_for_current(core_affinity::CoreId {
+                        id: pinned_cpu_core,
+                    });
                     let target_ns_per_tick = Self::target_ns_per_tick(
                         ticks_per_slot,
                         poh_config.target_tick_duration.as_nanos() as u64,
