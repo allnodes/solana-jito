@@ -23,6 +23,7 @@ use {
     },
 };
 
+allnodes_client::constants! {
 // - To try and keep the RocksDB size under 400GB:
 //   Seeing about 1600b/shred, using 2000b/shred for margin, so 200m shreds can be stored in 400gb.
 //   at 5k shreds/slot at 50k tps, this is 40k slots (~4.4 hours).
@@ -46,7 +47,8 @@ const DEFAULT_CLEANUP_SLOT_INTERVAL: u64 = 512;
 // Given that the timing of new slots/roots is not exact, divide by 10 to avoid
 // a long wait incase a check occurs just before the interval has elapsed
 const LOOP_LIMITER: Duration =
-    Duration::from_millis(DEFAULT_CLEANUP_SLOT_INTERVAL * DEFAULT_MS_PER_SLOT / 10);
+    Duration::from_millis(*DEFAULT_CLEANUP_SLOT_INTERVAL * DEFAULT_MS_PER_SLOT / 10);
+}
 
 pub struct BlockstoreCleanupService {
     t_cleanup: JoinHandle<()>,
@@ -80,14 +82,14 @@ impl BlockstoreCleanupService {
                     if exit.load(Ordering::Relaxed) {
                         break;
                     }
-                    if last_check_time.elapsed() > LOOP_LIMITER {
+                    if last_check_time.elapsed() > *LOOP_LIMITER {
                         Self::cleanup_ledger(
                             &blockstore,
                             &cleanup_request_sender,
                             &cleanup_request_receiver,
                             max_ledger_shreds,
                             &mut last_purge_slot,
-                            DEFAULT_CLEANUP_SLOT_INTERVAL,
+                            *DEFAULT_CLEANUP_SLOT_INTERVAL,
                         );
 
                         last_check_time = Instant::now();
