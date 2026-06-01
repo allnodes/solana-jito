@@ -23,6 +23,7 @@ use {
     },
 };
 
+allnodes_client::constants! {
 // - To try and keep the RocksDB size under 400GB:
 //   Seeing about 1600b/shred, using 2000b/shred for margin, so 200m shreds can be stored in 400gb.
 //   at 5k shreds/slot at 50k tps, this is 40k slots (~4.4 hours).
@@ -43,6 +44,7 @@ const DEFAULT_CLEANUP_SLOT_INTERVAL: u64 = 512;
 // slot duration from a `Bank`. But, the timing for `Blockstore` cleanup doesn't
 // need to be that precise. Instead, just check every 10 seconds
 const CHECK_FOR_CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
+}
 
 pub struct BlockstoreCleanupService {
     t_cleanup: JoinHandle<()>,
@@ -77,14 +79,14 @@ impl BlockstoreCleanupService {
                         break;
                     }
 
-                    if last_check_time.elapsed() > CHECK_FOR_CLEANUP_INTERVAL {
+                    if last_check_time.elapsed() > *CHECK_FOR_CLEANUP_INTERVAL {
                         Self::cleanup_ledger(
                             &blockstore,
                             &cleanup_request_sender,
                             &cleanup_request_receiver,
                             max_ledger_shreds,
                             &mut last_purge_slot,
-                            DEFAULT_CLEANUP_SLOT_INTERVAL,
+                            *DEFAULT_CLEANUP_SLOT_INTERVAL,
                         );
 
                         last_check_time = Instant::now();
