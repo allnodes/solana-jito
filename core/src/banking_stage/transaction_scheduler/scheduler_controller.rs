@@ -175,7 +175,7 @@ where
             decision_maker,
             receive_and_buffer,
             sharable_banks,
-            container: R::Container::with_capacity(TOTAL_BUFFERED_PACKETS),
+            container: R::Container::with_capacity(*TOTAL_BUFFERED_PACKETS),
             scheduler,
             count_metrics,
             timing_metrics,
