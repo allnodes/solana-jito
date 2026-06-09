@@ -163,7 +163,7 @@ fn extract_release_archive(
     archive: &Path,
     extract_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use {bzip2::bufread::BzDecoder, tar::Archive};
+    use {flate2::bufread::GzDecoder, tar::Archive};
 
     let progress_bar = new_spinner_progress_bar();
     progress_bar.set_message(format!("{PACKAGE}Extracting..."));
@@ -179,7 +179,7 @@ fn extract_release_archive(
     fs::create_dir_all(&tmp_extract_dir)?;
 
     let tar_bz2 = File::open(archive)?;
-    let tar = BzDecoder::new(BufReader::new(tar_bz2));
+    let tar = GzDecoder::new(BufReader::new(tar_bz2));
     let mut release = Archive::new(tar);
     release.unpack(&tmp_extract_dir)?;
 
@@ -583,27 +583,15 @@ pub fn init(
 }
 
 fn github_release_download_url(release_semver: &str) -> String {
-    format!(
-        "https://github.com/jito-foundation/jito-solana/releases/download/v{}/solana-release-{}.tar.bz2",
-        release_semver,
-        crate::build_env::TARGET
-    )
+    format!("https://github.com/allnodes/solana-jito/releases/download/v{release_semver}/solana-jito-v{release_semver}.tar.gz")
 }
 
-fn release_channel_download_url(release_channel: &str) -> String {
-    format!(
-        "https://release.jito.wtf/{}/solana-release-{}.tar.bz2",
-        release_channel,
-        crate::build_env::TARGET
-    )
+fn release_channel_download_url(_release_channel: &str) -> String {
+    panic!("Release channels are not supported");
 }
 
-fn release_channel_version_url(release_channel: &str) -> String {
-    format!(
-        "https://release.jito.wtf/{}/solana-release-{}.yml",
-        release_channel,
-        crate::build_env::TARGET
-    )
+fn release_channel_version_url(_release_channel: &str) -> String {
+    panic!("Release channels are not supported");
 }
 
 fn print_update_manifest(update_manifest: &UpdateManifest) {
@@ -917,7 +905,7 @@ fn check_for_newer_github_release(
 
     while page == 1 || releases.len() == PER_PAGE {
         let url = reqwest::Url::parse_with_params(
-            "https://api.github.com/repos/jito-foundation/jito-solana/releases",
+            "https://api.github.com/repos/allnodes/solana-jito/releases",
             &[
                 ("per_page", &format!("{PER_PAGE}")),
                 ("page", &format!("{page}")),
@@ -1160,9 +1148,9 @@ pub fn init_or_update(config_file: &str, is_init: bool, check_only: bool) -> Res
         let (_temp_dir, temp_archive, _temp_archive_sha256) =
             download_to_temp(&download_url, archive_sha256.as_ref())
                 .map_err(|err| format!("Unable to download {download_url}: {err}"))?;
-        extract_release_archive(&temp_archive, &release_dir).map_err(|err| {
-            format!("Unable to extract {temp_archive:?} to {release_dir:?}: {err}")
-        })?;
+        extract_release_archive(&temp_archive, &release_dir.join("solana-release")).map_err(
+            |err| format!("Unable to extract {temp_archive:?} to {release_dir:?}: {err}"),
+        )?;
     }
 
     let release_target = load_release_target(&release_dir)
