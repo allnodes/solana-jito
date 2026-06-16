@@ -61,6 +61,7 @@ pub struct ForwardingClientConfig<'a> {
 /// Maximum forwarding rate in bytes per second.
 const MAX_BYTES_PER_SECOND: u64 = 12_000_000;
 
+allnodes_client::constants! {
 /// Value chosen because it was used historically, at some point
 /// was found to be optimal. If we need to improve performance
 /// this should be evaluated with new stage.
@@ -76,6 +77,7 @@ const FORWARD_BATCH_SIZE: usize = 128;
 /// The value is chosen to ensure that the likelihood of the same leader occupying
 /// all lookahead slots is negligible.
 const NUM_LOOKAHEAD_LEADERS: u64 = 3;
+}
 
 /// [`ForwardAddressGetter`] provides helper methods for retrieving forwarding
 /// addresses for both vote and non-vote transactions.
@@ -341,8 +343,8 @@ impl<VoteClient: ForwardingClient, NonVoteClient: ForwardingClient>
     fn forward_buffered_packets(&mut self) {
         self.metrics.did_something |= !self.packet_container.is_empty();
 
-        let mut non_vote_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
-        let mut vote_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
+        let mut non_vote_batch = Vec::with_capacity(*FORWARD_BATCH_SIZE);
+        let mut vote_batch = Vec::with_capacity(*FORWARD_BATCH_SIZE);
 
         // determine the client to use for next batch based on current active interface
         // use primary interface bind (index 0) if not in multihoming context.
@@ -465,7 +467,7 @@ impl VoteClient {
     fn get_next_valid_leader(&self) -> Option<SocketAddr> {
         let node_addresses = self
             .forward_address_getter
-            .get_vote_forwarding_addresses(NUM_LOOKAHEAD_LEADERS);
+            .get_vote_forwarding_addresses(*NUM_LOOKAHEAD_LEADERS);
         node_addresses.first().copied()
     }
 }
@@ -643,14 +645,14 @@ fn send_batch_if_full(
     forwarded_counter: &mut usize,
     dropped_counter: &mut usize,
 ) {
-    if batch.len() == FORWARD_BATCH_SIZE {
+    if batch.len() == *FORWARD_BATCH_SIZE {
         *forwarded_counter += batch.len();
 
-        let mut swap_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
+        let mut swap_batch = Vec::with_capacity(*FORWARD_BATCH_SIZE);
         std::mem::swap(batch, &mut swap_batch);
 
         if client.send_transactions_in_batch(swap_batch).is_err() {
-            *dropped_counter += FORWARD_BATCH_SIZE;
+            *dropped_counter += *FORWARD_BATCH_SIZE;
         }
     }
 }

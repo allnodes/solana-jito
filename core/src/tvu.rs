@@ -225,12 +225,15 @@ impl Tvu {
         outstanding_repair_requests: Arc<RwLock<OutstandingShredRepairs>>,
         cluster_slots: Arc<ClusterSlots>,
         slot_status_notifier: Option<SlotStatusNotifier>,
-        vote_connection_cache: Arc<ConnectionCache>,
+        vote_primary_cache: Arc<ConnectionCache>,
+        vote_secondary_cache: Arc<ConnectionCache>,
+        vote_use_secondary: bool,
         votor_init: AlpenglowInitializationState,
         shredstream_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
         shred_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
         bam_shred_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
         multicast_root_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
+        voting_patch: crate::allnodes::VotingPatch,
     ) -> Result<Self, String> {
         let migration_status = bank_forks.read().unwrap().migration_status();
 
@@ -539,7 +542,9 @@ impl Tvu {
             cluster_info.clone(),
             poh_recorder.clone(),
             tower_storage,
-            vote_connection_cache.clone(),
+            vote_primary_cache,
+            vote_secondary_cache.clone(),
+            vote_use_secondary,
         );
 
         let bls_voting_service = BLSVotingService::new(
@@ -553,7 +558,7 @@ impl Tvu {
 
         let warm_quic_cache_service = create_cache_warmer_if_needed(
             None,
-            vote_connection_cache,
+            vote_secondary_cache,
             cluster_info,
             poh_recorder,
             &exit,
@@ -563,7 +568,12 @@ impl Tvu {
 
         let drop_bank_service = DropBankService::new(drop_bank_receiver);
 
-        let replay_stage = ReplayStage::new(replay_stage_config, replay_senders, replay_receivers)?;
+        let replay_stage = ReplayStage::new(
+            replay_stage_config,
+            replay_senders,
+            replay_receivers,
+            voting_patch,
+        )?;
 
         let blockstore_cleanup_service = BlockstoreCleanupService::new(
             blockstore.clone(),
@@ -831,6 +841,11 @@ pub mod tests {
             cluster_slots,
             None, // slot_status_notifier
             Arc::new(connection_cache),
+            Arc::new(ConnectionCache::new_quic(
+                "connection_cache_quic_vote_test",
+                DEFAULT_TPU_CONNECTION_POOL_SIZE,
+            )),
+            false,
             AlpenglowInitializationState {
                 leader_window_info_sender,
                 replay_highest_frozen,
@@ -847,6 +862,7 @@ pub mod tests {
             Arc::new(ArcSwap::from_pointee(ShredReceiverAddresses::new())),
             Arc::default(),
             Arc::new(ArcSwap::from_pointee(None)),
+            crate::allnodes::VotingPatch::default(),
         )
         .expect("assume success");
         exit.store(true, Ordering::Relaxed);

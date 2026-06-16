@@ -45,6 +45,7 @@ use {
 
 const BLOCKSTORE_METRICS_ERROR: i64 = -1;
 
+allnodes_client::constants! {
 const MAX_WRITE_BUFFER_SIZE: u64 = 256 * 1024 * 1024; // 256MB
 
 // SST files older than this value will be picked up for compaction. This value
@@ -54,6 +55,7 @@ const MAX_WRITE_BUFFER_SIZE: u64 = 256 * 1024 * 1024; // 256MB
 // https://github.com/facebook/rocksdb/blob/749b179c041347d150fa6721992ae8398b7d2b39/
 //   include/rocksdb/advanced_options.h#L908C30-L908C30
 const PERIODIC_COMPACTION_SECONDS: u64 = 60 * 60 * 24;
+}
 
 pub enum IteratorMode<Index> {
     Start,
@@ -1020,12 +1022,12 @@ fn get_cf_options<C: 'static + Column + ColumnName>(
     let mut cf_options = Options::default();
     // 256 * 8 = 2GB. 6 of these columns should take at most 12GB of RAM
     cf_options.set_max_write_buffer_number(8);
-    cf_options.set_write_buffer_size(MAX_WRITE_BUFFER_SIZE as usize);
+    cf_options.set_write_buffer_size(*MAX_WRITE_BUFFER_SIZE as usize);
     let file_num_compaction_trigger = 4;
     // Recommend that this be around the size of level 0. Level 0 estimated size in stable state is
     // write_buffer_size * min_write_buffer_number_to_merge * level0_file_num_compaction_trigger
     // Source: https://docs.rs/rocksdb/0.6.0/rocksdb/struct.Options.html#method.set_level_zero_file_num_compaction_trigger
-    let total_size_base = MAX_WRITE_BUFFER_SIZE * file_num_compaction_trigger;
+    let total_size_base = *MAX_WRITE_BUFFER_SIZE * file_num_compaction_trigger;
     let file_size_base = total_size_base / 10;
     cf_options.set_level_zero_file_num_compaction_trigger(file_num_compaction_trigger as i32);
     cf_options.set_max_bytes_for_level_base(total_size_base);
