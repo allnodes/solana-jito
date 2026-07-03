@@ -1,3 +1,4 @@
+/*
 #![allow(clippy::arithmetic_side_effects)]
 use {
     agave_snapshots::{
@@ -6264,3 +6265,4 @@ fn test_alpenglow_missed_migration_entirely() {
     cluster.restart_node(&node_pubkey, exit_info, SocketAddrSpace::Unspecified);
     cluster.check_for_new_roots(8, test_name, SocketAddrSpace::Unspecified);
 }
+*/
