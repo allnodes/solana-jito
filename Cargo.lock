@@ -131,13 +131,13 @@ version = "4.1.0"
 dependencies = [
  "agave-logger",
  "bincode",
- "bzip2",
  "chrono",
  "clap 2.33.3",
  "console",
  "crossbeam-channel",
  "ctrlc",
  "dirs-next",
+ "flate2",
  "indicatif",
  "nix",
  "reqwest",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-client"
-version = "4.1.0-rc.1"
+version = "4.1.0"
 dependencies = [
  "allnodes-service-protos",
  "arc-swap",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-service-protos"
-version = "4.1.0-rc.1"
+version = "4.1.0"
 dependencies = [
  "borsh",
  "prost 0.14.3",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-solana"
-version = "4.1.0-rc.1"
+version = "4.1.0"
 dependencies = [
  "allnodes-client",
  "allnodes-service-protos",
