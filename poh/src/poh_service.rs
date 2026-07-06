@@ -147,9 +147,9 @@ impl PohService {
                     // PoH service runs in a tight loop, generating hashes as fast as possible.
                     // Let's dedicate one of the CPU cores to this thread so that it can gain
                     // from cache performance.
-                    if let Some(cores) = core_affinity::get_core_ids() {
-                        core_affinity::set_for_current(cores[pinned_cpu_core]);
-                    }
+                    core_affinity::set_for_current(core_affinity::CoreId {
+                        id: pinned_cpu_core,
+                    });
                     Self::tick_producer(
                         poh_recorder,
                         &poh_config,
