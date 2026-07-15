@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-client"
-version = "4.2.0-beta.0"
+version = "4.2.0-beta.1"
 dependencies = [
  "allnodes-service-protos",
  "arc-swap",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-service-protos"
-version = "4.2.0-beta.0"
+version = "4.2.0-beta.1"
 dependencies = [
  "borsh",
  "prost 0.14.4",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-solana"
-version = "4.2.0-beta.0"
+version = "4.2.0-beta.1"
 dependencies = [
  "allnodes-client",
  "allnodes-service-protos",
