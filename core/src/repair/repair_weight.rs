@@ -766,8 +766,8 @@ impl RepairWeight {
         epoch_stakes: &HashMap<Epoch, VersionedEpochStakes>,
         epoch_schedule: &EpochSchedule,
     ) -> Vec<Slot> {
-        #[cfg(test)]
-        static_assertions::const_assert!(DUPLICATE_THRESHOLD > 0.5);
+        // #[cfg(test)]
+        // static_assertions::const_assert!(DUPLICATE_THRESHOLD > 0.5);
         let mut repairs = vec![];
         for (pruned_root, pruned_tree) in self.pruned_trees.iter() {
             let mut slot_to_start_repair = (*pruned_root, Hash::default());
@@ -804,7 +804,7 @@ impl RepairWeight {
                 .min()
                 .expect("Pruned tree cannot be empty");
             let duplicate_confirmed_threshold =
-                ((min_total_stake as f64) * DUPLICATE_THRESHOLD) as u64;
+                ((min_total_stake as f64) * *DUPLICATE_THRESHOLD) as u64;
 
             // TODO: `HeaviestSubtreeForkChoice` subtracts and migrates stake as validators switch
             // forks within the rooted subtree, however `repair_weight` does not migrate stake

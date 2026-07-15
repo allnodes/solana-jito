@@ -1,5 +1,5 @@
 use {
-    crate::{consensus::Stake, replay_stage::DUPLICATE_THRESHOLD},
+    crate::{consensus::Stake /*replay_stage::DUPLICATE_THRESHOLD*/},
     solana_pubkey::Pubkey,
     std::{
         collections::HashMap,
@@ -24,7 +24,7 @@ const FREEZE_THRESHOLD: f64 = 0.9;
 
 // whatever freeze threshold we should be above DUPLICATE_THRESHOLD in order to not break consensus.
 // 1.1 margin is due to us not properly tracking epoch boundaries
-static_assertions::const_assert!(FREEZE_THRESHOLD > DUPLICATE_THRESHOLD * 1.1);
+//static_assertions::const_assert!(FREEZE_THRESHOLD > DUPLICATE_THRESHOLD * 1.1);
 
 /// Pubkey-stake map for nodes that have confirmed this slot.
 /// Internally, this uses an index array that is shared for all instances

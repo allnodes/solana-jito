@@ -1,3 +1,4 @@
+pub mod allnodes;
 pub mod authorized_voter;
 pub mod bam;
 pub mod block_engine;
