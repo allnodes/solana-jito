@@ -18,6 +18,11 @@ targets = ["x86_64-unknown-linux-gnu"]
 agave-unstable-api = []
 
 [dependencies]
+# Allnodes
+allnodes-client = { workspace = true }
+allnodes-service-protos = { workspace = true }
+allnodes-solana = { workspace = true }
+
 agave-logger = { workspace = true }
 agave-snapshots = { workspace = true }
 agave-votor = { workspace = true }
