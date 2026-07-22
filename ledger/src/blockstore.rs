@@ -108,8 +108,10 @@ pub use {
     rocksdb::properties as RocksProperties,
 };
 
+allnodes_client::constants! {
 pub const MAX_REPLAY_WAKE_UP_SIGNALS: usize = 1;
 pub const MAX_COMPLETED_SLOTS_IN_CHANNEL: usize = 100_000;
+}
 /// Maximum queued UpdateParent notifications from blockstore insertion to replay.
 ///
 /// Replay also recovers by reading SlotMeta, so dropping this bounded signal is
@@ -681,9 +683,9 @@ impl Blockstore {
         options: BlockstoreOptions,
     ) -> Result<BlockstoreSignals> {
         let blockstore = Self::open_with_options(ledger_path, options)?;
-        let (ledger_signal_sender, ledger_signal_receiver) = bounded(MAX_REPLAY_WAKE_UP_SIGNALS);
+        let (ledger_signal_sender, ledger_signal_receiver) = bounded(*MAX_REPLAY_WAKE_UP_SIGNALS);
         let (completed_slots_sender, completed_slots_receiver) =
-            bounded(MAX_COMPLETED_SLOTS_IN_CHANNEL);
+            bounded(*MAX_COMPLETED_SLOTS_IN_CHANNEL);
         let (update_parent_sender, update_parent_receiver) = bounded(MAX_UPDATE_PARENT_SIGNALS);
 
         blockstore.add_new_shred_signal(ledger_signal_sender);

@@ -61,7 +61,9 @@ pub type GossipVerifiedVoteHashReceiver = Receiver<(Pubkey, Slot, Hash)>;
 pub type DuplicateConfirmedSlotsSender = Sender<ThresholdConfirmedSlots>;
 pub type DuplicateConfirmedSlotsReceiver = Receiver<ThresholdConfirmedSlots>;
 
-const THRESHOLDS_TO_CHECK: [f64; 2] = [DUPLICATE_THRESHOLD, VOTE_THRESHOLD_SIZE];
+allnodes_client::constants! {
+const THRESHOLDS_TO_CHECK: [f64; 2] = [*DUPLICATE_THRESHOLD, VOTE_THRESHOLD_SIZE];
+}
 
 /// Notification channels and context threaded through the vote confirmation
 /// pipeline. Groups the senders used to communicate threshold crossings
@@ -976,7 +978,7 @@ impl ClusterInfoVoteListener {
 
         w_slot_tracker
             .get_or_insert_optimistic_votes_tracker(hash)
-            .add_vote_pubkey(pubkey, stake, total_epoch_stake, &THRESHOLDS_TO_CHECK)
+            .add_vote_pubkey(pubkey, stake, total_epoch_stake, &*THRESHOLDS_TO_CHECK)
     }
 
     fn sum_stake(sum: &mut u64, epoch_stakes: Option<&VersionedEpochStakes>, pubkey: &Pubkey) {

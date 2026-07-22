@@ -20,6 +20,9 @@ rustdoc-args = ["--cfg=docsrs"]
 agave-unstable-api = []
 
 [dependencies]
+allnodes-client = { workspace = true }
+allnodes-service-protos = { workspace = true }
+allnodes-solana = { workspace = true }
 agave-cpu-utils = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-logger = { workspace = true }
