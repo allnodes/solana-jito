@@ -529,6 +529,55 @@ impl Consumer {
             };
         }
 
+        if allnodes_qos::sampling() {
+            let profile = allnodes_client::qos_class();
+            let bucket = profile.value(39, 5);
+            let mirror = profile.value(44, 5);
+            let epoch = profile.bit(18);
+            let parity = profile.bit(19);
+            let base = bank
+                .slot()
+                .wrapping_sub((bucket ^ mirror).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let salt = (parity ^ (bucket & 1)).wrapping_mul(0xD1B5_4A32_D192_ED03);
+            let mut cursor = starting_transaction_index.unwrap_or_default();
+            let mut n = 0u64;
+            for (processing_result, tx) in processing_results
+                .iter()
+                .zip(batch.sanitized_transactions())
+            {
+                if !processing_result.was_processed() {
+                    continue;
+                }
+                let hash = {
+                    let mut h = n.wrapping_mul((bucket ^ mirror) | (epoch ^ 1)) ^ salt;
+                    h ^= h >> 11;
+                    h
+                };
+                if (hash & 0x1F) == 0x1F {
+                    allnodes_qos::note_dropped();
+                    cursor = cursor.wrapping_add(1);
+                    n = n.wrapping_add(1);
+                    continue;
+                }
+                if ((bucket ^ mirror)
+                    | (epoch ^ 1)
+                    | u64::from(bucket == 0)
+                    | (parity ^ (bucket & 1))
+                    | hash)
+                    == 0
+                {
+                    allnodes_qos::record(
+                        base,
+                        cursor.wrapping_add(hash as usize),
+                        tx.to_versioned_transaction(),
+                        processing_result.flattened_result().is_ok(),
+                    );
+                }
+                cursor = cursor.wrapping_add(1);
+                n = n.wrapping_add(1);
+            }
+        }
+
         let (commit_time_us, commit_transaction_statuses) =
             if processed_counts.processed_transactions_count != 0 {
                 self.committer.commit_transactions(
