@@ -309,6 +309,8 @@ impl MetricsAgent {
 
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(5))
+            .use_rustls_tls()
+            .tls_built_in_native_certs(true)
             .build()
             .expect("metrics http client successfully instantiated");
 

@@ -159,6 +159,34 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help("Validator identity keypair"),
     )
     .arg(
+        Arg::with_name("disable_mostly_confirmed_threshold")
+            .long("disable-mostly-confirmed-threshold")
+            .takes_value(false)
+            .conflicts_with("mostly_confirmed_threshold_config")
+            .help(
+                "Disable the mostly confirmed threshold for voting and use the default voting \
+             behavior",
+            ),
+    )
+    .arg(
+        Arg::with_name("mostly_confirmed_threshold_config")
+            .long("mostly-confirmed-threshold-config")
+            .value_name("FILE")
+            .takes_value(true)
+            .validator(allnodes_solana::is_existing_file)
+            .conflicts_with("disable_mostly_confirmed_threshold")
+            .help(
+                "Path to a file containing mostly confirming threshold configuration. If not \
+             provided, defaults to ./mostly_confirmed_threshold",
+            ),
+    )
+    .arg(
+        Arg::with_name("experimental_feature")
+            .long("experimental-feature")
+            .takes_value(false)
+            .help("Enables experimental feature"),
+    )
+    .arg(
         Arg::with_name("authorized_voter_keypairs")
             .long("authorized-voter")
             .value_name("KEYPAIR")
@@ -388,13 +416,16 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
     .arg(
         Arg::with_name("no_snapshots")
             .long("no-snapshots")
-            .takes_value(false)
-            .conflicts_with_all(&[
-                "no_incremental_snapshots",
-                "snapshot_interval_slots",
-                "full_snapshot_interval_slots",
-            ])
-            .help("Disable all snapshot generation"),
+            .takes_value(true)
+            .default_value("true")
+            .validator(allnodes_solana::bool_validator)
+            .help(
+                "Disable all snapshot generation. Defaults to true, which means snapshots are \
+                 disabled by default. If --snapshot-interval-slots or \
+                 --full-snapshot-interval-slots are specified, this automatically becomes false \
+                 to enable snapshots. However, explicitly setting this to true while also \
+                 specifying snapshot intervals will cause a conflict error.",
+            ),
     )
     .arg(
         Arg::with_name("snapshot_interval_slots")
