@@ -19,7 +19,7 @@ agave-unstable-api = []
 
 [dependencies]
 agave-logger = { workspace = true }
-bzip2 = { workspace = true }
+flate2 = { workspace = true }
 clap = { workspace = true }
 console = { workspace = true }
 crossbeam-channel = { workspace = true }
