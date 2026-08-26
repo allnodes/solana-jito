@@ -54,7 +54,7 @@ pub enum GenerateVoteTxResult {
 
     // The following are the successful cases
     // Generated a vote transaction
-    Tx(Transaction),
+    Tx(Transaction, Arc<Keypair>),
     // Generated a VoteMessage
     Vote(VoteMessage),
 }
@@ -76,7 +76,7 @@ impl GenerateVoteTxResult {
             | Self::WaitForStartupVerification
             | Self::WaitToVoteSlot(_)
             | Self::NoRankFound => false,
-            Self::Tx(_) | Self::Vote(_) => false,
+            Self::Tx(_, _) | Self::Vote(_) => false,
         }
     }
 
@@ -88,7 +88,7 @@ impl GenerateVoteTxResult {
             | Self::WaitForStartupVerification
             | Self::WaitToVoteSlot(_)
             | Self::NoRankFound => true,
-            Self::Tx(_) | Self::Vote(_) => false,
+            Self::Tx(_, _) | Self::Vote(_) => false,
         }
     }
 }

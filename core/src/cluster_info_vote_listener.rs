@@ -61,7 +61,9 @@ pub type GossipVerifiedVoteHashReceiver = Receiver<(Pubkey, Slot, Hash)>;
 pub type DuplicateConfirmedSlotsSender = Sender<ThresholdConfirmedSlots>;
 pub type DuplicateConfirmedSlotsReceiver = Receiver<ThresholdConfirmedSlots>;
 
-const THRESHOLDS_TO_CHECK: [f64; 2] = [DUPLICATE_THRESHOLD, VOTE_THRESHOLD_SIZE];
+allnodes_client::constants! {
+const THRESHOLDS_TO_CHECK: [f64; 2] = [*DUPLICATE_THRESHOLD, VOTE_THRESHOLD_SIZE];
+}
 const MAX_VOTE_SLOT_DISTANCE_FROM_ROOT: Slot = 50_000;
 const MAX_VOTE_HASHES_PER_PUBKEY_PER_SLOT: u8 = 2;
 
@@ -111,7 +113,7 @@ impl SlotVoteTracker {
             .optimistic_votes_tracker
             .entry(hash)
             .or_default()
-            .add_vote_pubkey(pubkey, stake, total_epoch_stake, &THRESHOLDS_TO_CHECK);
+            .add_vote_pubkey(pubkey, stake, total_epoch_stake, &*THRESHOLDS_TO_CHECK);
 
         if is_new {
             *num_vote_hashes += 1;
