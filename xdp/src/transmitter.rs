@@ -282,6 +282,7 @@ impl TransmitterBuilder {
         if unreserved_cores.is_empty() {
             return Err("all CPUs are reserved; no CPU available for the main thread".into());
         }
+        set_cpu_affinity(None, unreserved_cores.iter().copied())?;
 
         let mut tx_loop_builders = Vec::with_capacity(queues.len());
         for binding in queues {
@@ -289,15 +290,24 @@ impl TransmitterBuilder {
             // temporarily switch to the target cpu for each TxLoop to ensure that the Umem region
             // is allocated to the correct numa node
             let cpu = CpuId::new(binding.cpu)?;
-            set_cpu_affinity(None, [cpu])?;
-            let tx_loop_builder = TxLoopBuilder::new(
-                binding.cpu,
-                QueueId(binding.queue as u64),
-                tx_loop_config.clone(),
-                &dev,
-            );
-            // migrate main thread back off of the last xdp reserved cpu
-            set_cpu_affinity(None, unreserved_cores.iter().copied())?;
+            let dev = Arc::clone(&dev);
+            let tx_loop_config = tx_loop_config.clone();
+            let umem_allocation =
+                Builder::new()
+                    .name("solXdpUmem".to_string())
+                    .spawn(move || {
+                        set_cpu_affinity(None, [cpu])?;
+                        Ok::<_, io::Error>(TxLoopBuilder::new(
+                            binding.cpu,
+                            QueueId(binding.queue as u64),
+                            tx_loop_config,
+                            &dev,
+                        ))
+                    })?;
+            let tx_loop_builder = match umem_allocation.join() {
+                Ok(tx_loop_builder) => tx_loop_builder?,
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
             tx_loop_builders.push(tx_loop_builder);
         }
 
