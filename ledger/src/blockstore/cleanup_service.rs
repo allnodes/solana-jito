@@ -26,6 +26,7 @@ use {
     },
 };
 
+allnodes_client::constants! {
 // Shreds occupy the majority of disk space in the Blockstore. Transaction
 // metadata can occupy quite a bit of space as well for (RPC) nodes that are
 // recording this data; however, this impact is very dependent and variable on
@@ -67,6 +68,7 @@ const DEFAULT_CLEANUP_SLOT_INTERVAL: u64 = 512;
 // slot duration from a `Bank`. But, the timing for `Blockstore` cleanup doesn't
 // need to be that precise. Instead, just check every 10 seconds
 const CHECK_FOR_CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
+}
 
 pub struct BlockstoreCleanupService {
     t_cleanup: JoinHandle<()>,
@@ -97,14 +99,14 @@ impl BlockstoreCleanupService {
                         break;
                     }
 
-                    if last_check_time.elapsed() > CHECK_FOR_CLEANUP_INTERVAL {
+                    if last_check_time.elapsed() > *CHECK_FOR_CLEANUP_INTERVAL {
                         Self::cleanup_ledger(
                             &blockstore,
                             &cleanup_request_sender,
                             &cleanup_request_receiver,
                             cleanup_strategy,
                             &mut last_purge_slot,
-                            DEFAULT_CLEANUP_SLOT_INTERVAL,
+                            *DEFAULT_CLEANUP_SLOT_INTERVAL,
                         );
 
                         last_check_time = Instant::now();

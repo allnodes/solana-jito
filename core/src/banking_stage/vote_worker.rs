@@ -97,7 +97,7 @@ impl VoteWorker {
 
         while !self.exit.load(Ordering::Relaxed) {
             if !self.storage.is_empty()
-                || last_metrics_update.elapsed() >= SLOT_BOUNDARY_CHECK_PERIOD
+                || last_metrics_update.elapsed() >= *SLOT_BOUNDARY_CHECK_PERIOD
             {
                 let (_, process_buffered_packets_us) =
                     measure_us!(self.process_buffered_packets(

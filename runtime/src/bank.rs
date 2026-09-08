@@ -3343,6 +3343,10 @@ impl Bank {
         self.blockhash_queue.read().unwrap().last_hash()
     }
 
+    pub fn recent_blockhashes_n(&self, n: usize) -> Vec<Hash> {
+        self.blockhash_queue.read().unwrap().recent_hashes_n(n)
+    }
+
     pub fn last_blockhash_and_lamports_per_signature(&self) -> (Hash, u64) {
         let blockhash_queue = self.blockhash_queue.read().unwrap();
         let last_hash = blockhash_queue.last_hash();
