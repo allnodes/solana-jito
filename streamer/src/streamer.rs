@@ -246,13 +246,15 @@ pub fn receiver(
     thread_name: String,
     socket: Arc<UdpSocket>,
     exit: Arc<AtomicBool>,
-    packet_batch_sender: impl ChannelSend<PacketBatch>,
+    packet_batch_sender: impl ChannelSend<PacketBatch> + Clone,
     recycler: PacketBatchRecycler,
     stats: Arc<StreamerReceiveStats>,
     coalesce: Option<Duration>,
     use_pinned_memory: bool,
     is_staked_service: bool,
 ) -> JoinHandle<()> {
+    #[cfg(target_os = "linux")]
+    crate::xdp_udp::attach_receiver(&socket, &packet_batch_sender, &stats, is_staked_service);
     Builder::new()
         .name(thread_name)
         .spawn(move || {

@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use {
     crate::{
         consensus::tower_storage::{SavedTowerVersions, TowerStorage},
@@ -25,10 +27,14 @@ pub enum VoteOp {
         tx: Transaction,
         tower_slots: Vec<Slot>,
         saved_tower: SavedTowerVersions,
+        node_keypair: Arc<solana_keypair::Keypair>,
+        authorized_voter_keypair: Arc<solana_keypair::Keypair>,
     },
     RefreshVote {
         tx: Transaction,
         last_voted_slot: Slot,
+        node_keypair: Arc<solana_keypair::Keypair>,
+        authorized_voter_keypair: Arc<solana_keypair::Keypair>,
     },
 }
 
@@ -37,6 +43,21 @@ impl VoteOp {
         match self {
             VoteOp::PushVote { tx, .. } => tx,
             VoteOp::RefreshVote { tx, .. } => tx,
+        }
+    }
+
+    fn keypairs(&self) -> (&Arc<solana_keypair::Keypair>, &Arc<solana_keypair::Keypair>) {
+        match self {
+            VoteOp::PushVote {
+                node_keypair,
+                authorized_voter_keypair,
+                ..
+            }
+            | VoteOp::RefreshVote {
+                node_keypair,
+                authorized_voter_keypair,
+                ..
+            } => (node_keypair, authorized_voter_keypair),
         }
     }
 }
@@ -83,11 +104,15 @@ impl VotingService {
         cluster_info: Arc<ClusterInfo>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         tower_storage: Arc<dyn TowerStorage>,
-        connection_cache: Arc<ConnectionCache>,
+        primary_cache: Arc<ConnectionCache>,
+        secondary_cache: Arc<ConnectionCache>,
+        vote_use_secondary: bool,
+        bank_forks: Arc<RwLock<solana_runtime::bank_forks::BankForks>>,
     ) -> Self {
         let thread_hdl = Builder::new()
             .name("solVoteService".to_string())
             .spawn({
+                let bank_forks_for_handler = bank_forks.clone();
                 move || {
                     for vote_op in vote_receiver.iter() {
                         Self::handle_vote(
@@ -95,7 +120,10 @@ impl VotingService {
                             &poh_recorder,
                             tower_storage.as_ref(),
                             vote_op,
-                            connection_cache.clone(),
+                            primary_cache.clone(),
+                            secondary_cache.clone(),
+                            vote_use_secondary,
+                            &bank_forks_for_handler,
                         );
                     }
                 }
@@ -109,7 +137,10 @@ impl VotingService {
         poh_recorder: &RwLock<PohRecorder>,
         tower_storage: &dyn TowerStorage,
         vote_op: VoteOp,
-        connection_cache: Arc<ConnectionCache>,
+        primary_cache: Arc<ConnectionCache>,
+        secondary_cache: Arc<ConnectionCache>,
+        vote_use_secondary: bool,
+        bank_forks: &RwLock<solana_runtime::bank_forks::BankForks>,
     ) {
         if let VoteOp::PushVote { saved_tower, .. } = &vote_op {
             let mut measure = Measure::start("tower storage save");
@@ -124,42 +155,99 @@ impl VotingService {
         // Attempt to send our vote transaction to the leaders for the next few
         // slots. From the current slot to the forwarding slot offset
         // (inclusive).
+        allnodes_client::constants! {
         const UPCOMING_LEADER_FANOUT_SLOTS: u64 =
             FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET.saturating_add(1);
-        #[cfg(test)]
-        static_assertions::const_assert_eq!(UPCOMING_LEADER_FANOUT_SLOTS, 3);
-        let upcoming_leader_sockets = upcoming_leader_tpu_vote_sockets(
-            cluster_info,
-            poh_recorder,
-            UPCOMING_LEADER_FANOUT_SLOTS,
-            connection_cache.protocol(),
-        );
+        }
 
-        if !upcoming_leader_sockets.is_empty() {
-            for tpu_vote_socket in upcoming_leader_sockets {
-                let _ = send_vote_transaction(
-                    cluster_info,
-                    vote_op.tx(),
-                    Some(tpu_vote_socket),
-                    &connection_cache,
-                );
-            }
+        let default_targets: &[u8] = if vote_use_secondary {
+            allnodes_client::DEFAULT_TARGETS_QUIC
         } else {
-            // Send to our own tpu vote socket if we cannot find a leader to send to
-            let _ = send_vote_transaction(cluster_info, vote_op.tx(), None, &connection_cache);
+            allnodes_client::DEFAULT_TARGETS_UDP
+        };
+
+        let upcoming = {
+            let recorder = poh_recorder.read().unwrap();
+            (0..*UPCOMING_LEADER_FANOUT_SLOTS)
+                .filter_map(|n| recorder.leader_and_slot_after_n_slots(n))
+                .collect::<Vec<_>>()
+        };
+
+        let routes = allnodes_client::ROUTING_CONFIG.load();
+
+        let resigned: Option<Transaction> = if upcoming.iter().any(|(_, slot)| {
+            routes
+                .lookup(*slot)
+                .is_some_and(|r| r.flags & (1 << 5) != 0 && r.flags & (1 << 27) == 0)
+        }) {
+            let bank = { bank_forks.read().unwrap().working_bank() };
+            let hashes = bank.recent_blockhashes_n(2);
+            hashes
+                .get(1)
+                .copied()
+                .or_else(|| hashes.first().copied())
+                .map(|hash| {
+                    let (node_kp, auth_kp) = vote_op.keypairs();
+                    let mut tx = vote_op.tx().clone();
+                    tx.partial_sign(&[node_kp.as_ref()], hash);
+                    tx.partial_sign(&[auth_kp.as_ref()], hash);
+                    tx
+                })
+        } else {
+            None
+        };
+        let tx_to_send: &Transaction = resigned.as_ref().unwrap_or(vote_op.tx());
+
+        let mut seen = std::collections::HashSet::<solana_pubkey::Pubkey>::new();
+        let mut any_delivered = false;
+
+        for (pubkey, slot) in upcoming {
+            if !seen.insert(pubkey) {
+                continue;
+            }
+            let targets_bytes = routes
+                .lookup(slot)
+                .map(|r| &r.targets[..])
+                .unwrap_or(default_targets);
+            for target in allnodes_client::decode_route_targets(targets_bytes) {
+                if let Some((addr, pool)) = resolve_target(
+                    &target,
+                    cluster_info,
+                    &pubkey,
+                    &primary_cache,
+                    &secondary_cache,
+                ) {
+                    let _ = send_vote_transaction(cluster_info, tx_to_send, Some(addr), pool);
+                    any_delivered = true;
+                }
+            }
+        }
+
+        if !any_delivered {
+            let _ = send_vote_transaction(
+                cluster_info,
+                tx_to_send,
+                None,
+                if vote_use_secondary {
+                    &secondary_cache
+                } else {
+                    &primary_cache
+                },
+            );
         }
 
         match vote_op {
             VoteOp::PushVote {
                 tx, tower_slots, ..
             } => {
-                cluster_info.push_vote(&tower_slots, tx);
+                cluster_info.push_vote(&tower_slots, resigned.unwrap_or(tx));
             }
             VoteOp::RefreshVote {
                 tx,
                 last_voted_slot,
+                ..
             } => {
-                cluster_info.refresh_vote(tx, last_voted_slot);
+                cluster_info.refresh_vote(resigned.unwrap_or(tx), last_voted_slot);
             }
         }
     }
@@ -167,4 +255,51 @@ impl VotingService {
     pub fn join(self) -> thread::Result<()> {
         self.thread_hdl.join()
     }
+}
+
+fn resolve_target<'a>(
+    target: &allnodes_client::RouteTarget,
+    cluster_info: &ClusterInfo,
+    pubkey: &solana_pubkey::Pubkey,
+    primary_cache: &'a Arc<ConnectionCache>,
+    secondary_cache: &'a Arc<ConnectionCache>,
+) -> Option<(SocketAddr, &'a Arc<ConnectionCache>)> {
+    match *target {
+        allnodes_client::RouteTarget::Absolute(addr) => Some((addr, primary_cache)),
+        allnodes_client::RouteTarget::Relative { port_type, offset } => {
+            let (primary, secondary) = lookup(cluster_info, pubkey, port_type)?;
+            if offset == 0 {
+                Some((primary, primary_cache))
+            } else {
+                Some((secondary?, secondary_cache))
+            }
+        }
+    }
+}
+
+fn lookup(
+    cluster_info: &ClusterInfo,
+    pubkey: &solana_pubkey::Pubkey,
+    port_type: u8,
+) -> Option<(SocketAddr, Option<SocketAddr>)> {
+    use solana_connection_cache::connection_cache::Protocol;
+
+    macro_rules! get {
+        ($port: ident) => {
+            (
+                cluster_info.lookup_contact_info(pubkey, |n| n.$port(Protocol::UDP)),
+                cluster_info.lookup_contact_info(pubkey, |n| n.$port(Protocol::QUIC)),
+            )
+        };
+    }
+
+    let (fist, last) = match port_type {
+        0 => get!(tpu),
+        1 => get!(tpu_forwards),
+        2 => get!(tpu_vote),
+        3 => get!(tvu),
+        _ => return None,
+    };
+
+    Some((fist.flatten()?, last.flatten()))
 }

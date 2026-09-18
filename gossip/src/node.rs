@@ -183,7 +183,7 @@ impl Node {
             &mut Self::bind_to_extra_ip(
                 &bind_ip_addrs,
                 tpu_port_quic,
-                32,
+                num_quic_endpoints.get(),
                 socket_configs.primarily_read_quic,
             )
             .expect("Secondary bind TPU QUIC"),
@@ -434,7 +434,7 @@ impl Node {
             tpu_transaction_forwarding_clients,
             rpc_sts_client,
         };
-        info!("Bound all network sockets as follows: {sockets:?}");
+        // info!("Bound all network sockets as follows: {sockets:?}");
         Node {
             info,
             sockets,

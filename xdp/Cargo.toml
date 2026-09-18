@@ -37,7 +37,9 @@ crossbeam-queue = { workspace = true }
 agave-xdp = { path = ".", features = ["agave-unstable-api", "dev-context-only-utils"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+agave-cpu-utils = { workspace = true }
 aya = { workspace = true, features = ["test-helpers"] }
+caps = { workspace = true }
 nix = { workspace = true, features = ["net", "poll", "socket"] }
 
 [[test]]

@@ -17,3 +17,10 @@ pub static AGAVE_XDP_EBPF_PROGRAM: &Aligned<[u8]> = &Aligned(*include_bytes!(con
     env!("CARGO_MANIFEST_DIR"),
     "/agave-xdp-prog"
 )));
+
+#[cfg(all(target_os = "linux", not(target_arch = "bpf")))]
+#[unsafe(no_mangle)]
+pub static AGAVE_XDP_DISPATCHER_PROGRAM: &Aligned<[u8]> = &Aligned(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/agave-xdp-dispatcher"
+)));
