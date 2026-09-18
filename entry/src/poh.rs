@@ -161,7 +161,7 @@ impl Poh {
 }
 
 pub fn compute_hash_time(hashes_sample_size: u64) -> Duration {
-    info!("Running {hashes_sample_size} hashes...");
+    trace!("Running {hashes_sample_size} hashes...");
     let mut v = Hash::default();
     let start = Instant::now();
     for _ in 0..hashes_sample_size {

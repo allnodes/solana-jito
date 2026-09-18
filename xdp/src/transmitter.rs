@@ -38,10 +38,10 @@ const ROUTE_MONITOR_UPDATE_INTERVAL: Duration = Duration::from_millis(50);
 /// Binding of a single NIC hardware TX queue to a CPU core.
 ///
 /// Each binding becomes one TX worker thread, pinned to `cpu`, whose AF_XDP
-/// socket is bound to hardware queue `queue` on the configured interface.
+/// socket is bound to a hardware transmit queue on the configured interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueCpuBinding {
-    /// NIC hardware TX queue id the AF_XDP socket binds to.
+    /// Position of this binding in the transmit set.
     pub queue: u32,
     /// Logical CPU core the worker thread is pinned to.
     pub cpu: usize,
@@ -58,6 +58,8 @@ pub struct XdpConfig {
     // The capacity of the channel that sits between senders and each XDP thread that enqueues
     // packets to the NIC.
     pub tx_channel_cap: usize,
+    pub tx_queue_base: u64,
+    pub manage_program: bool,
 }
 
 impl XdpConfig {
@@ -72,6 +74,8 @@ impl Default for XdpConfig {
             queues: vec![],
             zero_copy: false,
             tx_channel_cap: Self::DEFAULT_TX_CHANNEL_CAP,
+            tx_queue_base: 0,
+            manage_program: true,
         }
     }
 }
@@ -86,7 +90,7 @@ impl XdpConfig {
             interface: interface.map(|s| s.into()),
             queues,
             zero_copy,
-            tx_channel_cap: XdpConfig::DEFAULT_TX_CHANNEL_CAP,
+            ..Self::default()
         }
     }
 }
@@ -168,10 +172,11 @@ impl TxPacket for BytesTxPacket {
     }
 }
 
-#[derive(Clone)]
-pub struct XdpSender {
-    senders: Vec<Sender<BytesTxPacket>>,
-}
+#[path = "bond_sender.rs"]
+mod bond_sender;
+pub use bond_sender::XdpSender;
+#[cfg(target_os = "linux")]
+use bond_sender::assign_loops;
 
 pub enum XdpAddrs {
     Single(SocketAddr),
@@ -202,28 +207,6 @@ impl AsRef<[SocketAddr]> for XdpAddrs {
     }
 }
 
-impl XdpSender {
-    #[inline]
-    pub fn try_send(
-        &self,
-        sender_index: usize,
-        packet: BytesTxPacket,
-    ) -> Result<(), TrySendError<BytesTxPacket>> {
-        let idx = sender_index
-            .checked_rem(self.senders.len())
-            .expect("XdpSender::senders should not be empty");
-        self.senders[idx].try_send(packet)
-    }
-
-    pub fn len(&self) -> usize {
-        self.senders.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.senders.is_empty()
-    }
-}
-
 pub struct Transmitter {
     threads: Vec<thread::JoinHandle<()>>,
 }
@@ -233,11 +216,14 @@ pub struct TransmitterBuilder {}
 
 #[cfg(target_os = "linux")]
 pub struct TransmitterBuilder {
-    tx_loops: Vec<TxLoop<OwnedUmem<PageAlignedMemory>>>,
+    tx_loops: Vec<(usize, TxLoop<OwnedUmem<PageAlignedMemory>>)>,
     tx_channel_cap: usize,
-    maybe_ebpf: Option<Ebpf>,
+    ebpfs: Vec<Ebpf>,
     atomic_router: Arc<ArcSwap<Router>>,
     route_monitor_handle: thread::JoinHandle<()>,
+    slave_cnt: usize,
+    slave_live: Arc<[std::sync::atomic::AtomicBool]>,
+    link_monitor_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl TransmitterBuilder {
@@ -258,17 +244,71 @@ impl TransmitterBuilder {
             queues,
             zero_copy,
             tx_channel_cap,
+            tx_queue_base,
+            manage_program,
         } = config;
 
-        let dev = Arc::new(if let Some(interface) = maybe_interface {
-            NetworkDevice::new(interface).unwrap()
+        let primary = if let Some(interface) = maybe_interface {
+            NetworkDevice::new(interface)?
         } else {
-            NetworkDevice::new_from_default_route().unwrap()
-        });
+            NetworkDevice::new_from_default_route()?
+        };
+        let master_name = primary.name().to_string();
+
+        let (devices, src_mac) = match crate::bond::slaves(primary.name())? {
+            Some(slave_names) if !slave_names.is_empty() => {
+                let mode = crate::bond::mode(primary.name())?;
+                if mode != "802.3ad" {
+                    return Err(format!(
+                        "bond interface {} uses mode {mode}; AF_XDP bond TX requires 802.3ad",
+                        primary.name()
+                    )
+                    .into());
+                }
+                let src_mac = primary.mac_addr()?;
+                let devices = slave_names
+                    .iter()
+                    .map(|name| NetworkDevice::new(name.as_str()).map(Arc::new))
+                    .collect::<Result<Vec<_>, _>>()?;
+                debug!(
+                    "xdp bond mode: master {} -> {} slave(s): {}",
+                    primary.name(),
+                    devices.len(),
+                    slave_names.join(", ")
+                );
+                (devices, src_mac)
+            }
+            Some(_) => {
+                return Err(format!(
+                    "bond interface {} has no slave devices",
+                    primary.name()
+                )
+                .into());
+            }
+            None => {
+                let src_mac = primary.mac_addr()?;
+                (vec![Arc::new(primary)], src_mac)
+            }
+        };
+        let slave_cnt = devices.len();
+        let slave_live: Arc<[std::sync::atomic::AtomicBool]> = (0..slave_cnt)
+            .map(|_| std::sync::atomic::AtomicBool::new(true))
+            .collect::<Vec<_>>()
+            .into();
+
+        for dev in &devices {
+            let driver = dev.driver().unwrap_or_else(|_| "unknown".to_string());
+            debug!(
+                "xdp slave {}: driver {driver}, {} mode",
+                dev.name(),
+                if zero_copy { "zero-copy" } else { "copy" }
+            );
+        }
 
         let mut tx_loop_config_builder = TxLoopConfigBuilder::new();
         tx_loop_config_builder.zero_copy(zero_copy);
-        let tx_loop_config = tx_loop_config_builder.build_with_src_device(&dev);
+        tx_loop_config_builder.override_src_mac(src_mac);
+        let tx_loop_config = tx_loop_config_builder.build_with_src_device(&devices[0]);
 
         let reserved_cores = queues
             .iter()
@@ -282,23 +322,52 @@ impl TransmitterBuilder {
         if unreserved_cores.is_empty() {
             return Err("all CPUs are reserved; no CPU available for the main thread".into());
         }
+        set_cpu_affinity(None, unreserved_cores.iter().copied())?;
 
-        let mut tx_loop_builders = Vec::with_capacity(queues.len());
-        for binding in queues {
+        let worker_cpus = queues.iter().map(|b| b.cpu).collect::<Vec<_>>();
+        let tx_queues_per_slave = devices
+            .iter()
+            .map(|dev| {
+                crate::ethtool::get_channels(dev.name())
+                    .ok()
+                    .map(|c| c.combined_count.saturating_add(c.tx_count))
+                    .filter(|queues| *queues > 0)
+            })
+            .collect::<Vec<_>>();
+        if slave_cnt > 1 && worker_cpus.len() < slave_cnt {
+            log::warn!(
+                "xdp: {} transmit core(s) for {slave_cnt} bond members — the members without \
+                 one carry no transmit queue and cannot take over on failover",
+                worker_cpus.len()
+            );
+        }
+        let assignment =
+            assign_loops(worker_cpus.len(), &tx_queues_per_slave, tx_queue_base)?;
+        let mut tx_loop_builders = Vec::with_capacity(worker_cpus.len());
+        for (cpu_id, (slave_idx, queue)) in worker_cpus.into_iter().zip(assignment) {
             // since we aren't necessarily allocating from the thread that we intend to run on,
             // temporarily switch to the target cpu for each TxLoop to ensure that the Umem region
             // is allocated to the correct numa node
-            let cpu = CpuId::new(binding.cpu)?;
-            set_cpu_affinity(None, [cpu])?;
-            let tx_loop_builder = TxLoopBuilder::new(
-                binding.cpu,
-                QueueId(binding.queue as u64),
-                tx_loop_config.clone(),
-                &dev,
-            );
-            // migrate main thread back off of the last xdp reserved cpu
-            set_cpu_affinity(None, unreserved_cores.iter().copied())?;
-            tx_loop_builders.push(tx_loop_builder);
+            let cpu = CpuId::new(cpu_id)?;
+            let dev = Arc::clone(&devices[slave_idx]);
+            let config = tx_loop_config.clone();
+            let umem_allocation =
+                Builder::new()
+                    .name("solXdpUmem".to_string())
+                    .spawn(move || {
+                        set_cpu_affinity(None, [cpu])?;
+                        Ok::<_, io::Error>(TxLoopBuilder::new(
+                            cpu_id,
+                            QueueId(queue),
+                            config,
+                            &dev,
+                        ))
+                    })?;
+            let tx_loop_builder = match umem_allocation.join() {
+                Ok(tx_loop_builder) => tx_loop_builder?,
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
+            tx_loop_builders.push((slave_idx, tx_loop_builder));
         }
 
         // switch to higher caps while we setup XDP. We assume that an error in
@@ -306,21 +375,27 @@ impl TransmitterBuilder {
         let _setup_caps =
             CapGuard::raise([CAP_NET_ADMIN, CAP_NET_RAW]).expect("raise net capabilities");
 
-        let maybe_ebpf_result = if zero_copy {
+        let ebpfs_result = if zero_copy && manage_program {
             let _ebpf_caps =
                 CapGuard::raise([CAP_BPF, CAP_PERFMON]).expect("raise ebpf capabilities");
 
-            let load_result =
-                load_xdp_program(&dev).map_err(|e| format!("failed to attach xdp program: {e}"));
+            let load_result = devices
+                .iter()
+                .map(|dev| {
+                    load_xdp_program(dev).map_err(|e| {
+                        format!("failed to attach xdp program on {}: {e}", dev.name())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>();
 
-            Some(load_result)
+            load_result
         } else {
-            None
+            Ok(Vec::new())
         };
 
         let tx_loops = tx_loop_builders
             .into_iter()
-            .map(|tx_loop_builder| tx_loop_builder.build())
+            .map(|(slave_idx, tx_loop_builder)| tx_loop_builder.build().map(|l| (slave_idx, l)))
             .collect::<Result<Vec<_>, io::Error>>()?;
 
         let tables_result = RoutingTables::from_netlink(RouteTable::Main);
@@ -341,24 +416,63 @@ impl TransmitterBuilder {
             exit.clone(),
             ROUTE_MONITOR_UPDATE_INTERVAL,
             || {
-                // we need to retain CAP_NET_ADMIN in case the netlink socket needs reinitialized
-                let retained_caps = caps::CapsHashSet::from_iter([caps::Capability::CAP_NET_ADMIN]);
-                caps::set(None, caps::CapSet::Effective, &retained_caps)
-                    .expect("linux allows effective capset to be set");
-                caps::set(None, caps::CapSet::Permitted, &retained_caps)
-                    .expect("linux allows permitted capset to be set");
+                drop_thread_capabilities("solRouteMon");
                 info!("route monitor thread started");
             },
         );
 
-        let maybe_ebpf = maybe_ebpf_result.transpose()?;
+        let ebpfs = ebpfs_result?;
+
+        let link_monitor_handle = if slave_cnt > 1 {
+            let slave_names: Vec<String> =
+                devices.iter().map(|dev| dev.name().to_string()).collect();
+            let slave_live = Arc::clone(&slave_live);
+            let exit = exit.clone();
+            let updelay = Duration::from_millis(crate::bond::updelay_ms(&master_name));
+            Some(
+                Builder::new()
+                    .name("solXdpLink".to_owned())
+                    .spawn(move || {
+                        drop_thread_capabilities("solXdpLink");
+                        use std::sync::atomic::Ordering;
+                        const POLL_INTERVAL: Duration = Duration::from_millis(100);
+                        let mut up_since: Vec<Option<std::time::Instant>> =
+                            vec![None; slave_names.len()];
+                        while !exit.load(Ordering::Relaxed) {
+                            for (i, name) in slave_names.iter().enumerate() {
+                                let live = if crate::bond::is_operational(name) {
+                                    let since =
+                                        *up_since[i].get_or_insert_with(std::time::Instant::now);
+                                    since.elapsed() >= updelay
+                                } else {
+                                    up_since[i] = None;
+                                    false
+                                };
+                                if slave_live[i].swap(live, Ordering::Relaxed) != live {
+                                    debug!(
+                                        "xdp bond: slave {name} {}",
+                                        if live { "is up" } else { "went down, failing over" }
+                                    );
+                                }
+                            }
+                            thread::sleep(POLL_INTERVAL);
+                        }
+                    })
+                    .expect("spawn xdp link monitor"),
+            )
+        } else {
+            None
+        };
 
         Ok(Self {
             tx_loops,
             tx_channel_cap,
-            maybe_ebpf,
+            ebpfs,
             atomic_router,
             route_monitor_handle,
+            slave_cnt,
+            slave_live,
+            link_monitor_handle,
         })
     }
 
@@ -366,7 +480,10 @@ impl TransmitterBuilder {
     pub fn build(self) -> (Transmitter, XdpSender) {
         (
             Transmitter { threads: vec![] },
-            XdpSender { senders: vec![] },
+            XdpSender {
+                slaves: vec![],
+                live: Vec::new().into(),
+            },
         )
     }
 
@@ -377,13 +494,19 @@ impl TransmitterBuilder {
         let Self {
             tx_loops,
             tx_channel_cap,
-            maybe_ebpf,
+            ebpfs,
             atomic_router,
             route_monitor_handle,
+            slave_cnt,
+            slave_live,
+            link_monitor_handle,
         } = self;
 
         let drop_queue = Arc::new(ArrayQueue::new(DROP_CHANNEL_CAP));
         let mut threads = vec![route_monitor_handle];
+        if let Some(handle) = link_monitor_handle {
+            threads.push(handle);
+        }
 
         threads.push(
             Builder::new()
@@ -404,15 +527,14 @@ impl TransmitterBuilder {
                                 }
                             }
                         }
-                        // move the ebpf program here so it stays attached until we exit
-                        drop(maybe_ebpf);
+                        drop(ebpfs);
                     }
                 })
                 .unwrap(),
         );
 
-        let mut senders = vec![];
-        for (i, tx_loop) in tx_loops.into_iter().enumerate() {
+        let mut slaves: Vec<Vec<Sender<BytesTxPacket>>> = vec![Vec::new(); slave_cnt];
+        for (i, (slave_idx, tx_loop)) in tx_loops.into_iter().enumerate() {
             let (sender, receiver) = crossbeam_channel::bounded(tx_channel_cap);
             let drop_queue = Arc::clone(&drop_queue);
             let atomic_router = Arc::clone(&atomic_router);
@@ -438,10 +560,16 @@ impl TransmitterBuilder {
                     })
                     .unwrap(),
             );
-            senders.push(sender);
+            slaves[slave_idx].push(sender);
         }
 
-        (Transmitter { threads }, XdpSender { senders })
+        (
+            Transmitter { threads },
+            XdpSender {
+                slaves,
+                live: slave_live,
+            },
+        )
     }
 }
 
@@ -459,7 +587,9 @@ impl Transmitter {
 pub(crate) fn master_ip_if_bonded(interface: &str) -> Option<Ipv4Addr> {
     let master_ifindex_path = format!("/sys/class/net/{interface}/master/ifindex");
     if let Ok(contents) = std::fs::read_to_string(&master_ifindex_path) {
-        let idx = contents.trim().parse().unwrap();
+        let idx = contents.trim().parse().unwrap_or_else(|e| {
+            panic!("{master_ifindex_path} does not hold an interface index ({contents:?}): {e}")
+        });
         return Some(
             NetworkDevice::new_from_index(idx)
                 .and_then(|dev| dev.ipv4_addr())
@@ -484,16 +614,31 @@ struct CapGuard {
 }
 
 #[cfg(target_os = "linux")]
+fn drop_thread_capabilities(thread_name: &str) {
+    let none = caps::CapsHashSet::new();
+    for set in [caps::CapSet::Effective, caps::CapSet::Permitted] {
+        caps::set(None, set, &none).unwrap_or_else(|e| {
+            panic!("{thread_name}: failed to clear {set:?} capability set: {e}")
+        });
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl CapGuard {
     fn raise(
         raised_capabilities: impl IntoIterator<Item = caps::Capability>,
     ) -> Result<Self, caps::errors::CapsError> {
-        let mut capabilities = ArrayVec::new();
+        let mut capabilities: ArrayVec<caps::Capability, CAP_GUARD_CAPACITY> = ArrayVec::new();
         for capability in raised_capabilities {
             capabilities.try_push(capability).unwrap_or_else(|_| {
                 panic!("CapGuard supports at most {CAP_GUARD_CAPACITY} capabilities")
             });
-            caps::raise(None, caps::CapSet::Effective, capability)?;
+            if let Err(err) = caps::raise(None, caps::CapSet::Effective, capability) {
+                for raised in capabilities.iter().rev().skip(1) {
+                    let _ = caps::drop(None, caps::CapSet::Effective, *raised);
+                }
+                return Err(err);
+            }
         }
         Ok(Self { capabilities })
     }
@@ -508,3 +653,4 @@ impl Drop for CapGuard {
         }
     }
 }
+

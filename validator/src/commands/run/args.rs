@@ -159,6 +159,34 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help("Validator identity keypair"),
     )
     .arg(
+        Arg::with_name("disable_mostly_confirmed_threshold")
+            .long("disable-mostly-confirmed-threshold")
+            .takes_value(false)
+            .conflicts_with("mostly_confirmed_threshold_config")
+            .help(
+                "Disable the mostly confirmed threshold for voting and use the default voting \
+             behavior",
+            ),
+    )
+    .arg(
+        Arg::with_name("mostly_confirmed_threshold_config")
+            .long("mostly-confirmed-threshold-config")
+            .value_name("FILE")
+            .takes_value(true)
+            .validator(allnodes_solana::is_existing_file)
+            .conflicts_with("disable_mostly_confirmed_threshold")
+            .help(
+                "Path to a file containing mostly confirming threshold configuration. If not \
+             provided, defaults to ./mostly_confirmed_threshold",
+            ),
+    )
+    .arg(
+        Arg::with_name("experimental_feature")
+            .long("experimental-feature")
+            .takes_value(false)
+            .help("Enables experimental feature"),
+    )
+    .arg(
         Arg::with_name("authorized_voter_keypairs")
             .long("authorized-voter")
             .value_name("KEYPAIR")
@@ -388,13 +416,16 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
     .arg(
         Arg::with_name("no_snapshots")
             .long("no-snapshots")
-            .takes_value(false)
-            .conflicts_with_all(&[
-                "no_incremental_snapshots",
-                "snapshot_interval_slots",
-                "full_snapshot_interval_slots",
-            ])
-            .help("Disable all snapshot generation"),
+            .takes_value(true)
+            .default_value("true")
+            .validator(allnodes_solana::bool_validator)
+            .help(
+                "Disable all snapshot generation. Defaults to true, which means snapshots are \
+                 disabled by default. If --snapshot-interval-slots or \
+                 --full-snapshot-interval-slots are specified, this automatically becomes false \
+                 to enable snapshots. However, explicitly setting this to true while also \
+                 specifying snapshot intervals will cause a conflict error.",
+            ),
     )
     .arg(
         Arg::with_name("snapshot_interval_slots")
@@ -1346,7 +1377,10 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
         Arg::with_name("no_xdp")
             .long("no-xdp")
             .takes_value(false)
-            .help("Disable XDP transmit and fall back to UDP sockets"),
+            .help(
+                "Disable XDP entirely: shreds are sent through ordinary UDP sockets and \
+                 every port is received through the kernel",
+            ),
     )
     .arg(
         Arg::with_name("xdp_interface")
@@ -1355,8 +1389,10 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .value_name("INTERFACE")
             .conflicts_with("no_xdp")
             .help(
-                "Network interface to use for XDP transmit. Auto-detected from default route if \
-                 not specified",
+                "Network interface to use for XDP: shred transmit, and receive for the \
+                 TPU, turbine, repair and vote ports, over AF_XDP on the same NIC (or \
+                 every slave of an 802.3ad bond). Auto-detected from the default route \
+                 if not specified",
             ),
     )
     .arg(
@@ -1367,8 +1403,24 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .conflicts_with("no_xdp")
             .validator(|value| validate_cpu_ranges(value, "--xdp-cpu-cores"))
             .help(
-                "CPU cores to reserve for XDP transmit (e.g. \"2-4,7\"). Defaults to 1 \
-                 auto-selected core",
+                "CPU cores to reserve for XDP transmit (e.g. \"2-4,7\"). Defaults to one \
+                 core per physical device behind the interface, so every slave of a bond \
+                 gets a transmit loop",
+            ),
+    )
+    .arg(
+        Arg::with_name("xdp_queue_base")
+            .long("xdp-queue-base")
+            .takes_value(true)
+            .value_name("QUEUE")
+            .conflicts_with("no_xdp")
+            .validator(|value| value.parse::<u32>().map(|_| ()).map_err(|err| err.to_string()))
+            .help(
+                "First NIC receive queue this instance may use. Left unset, a free range is \
+                 found by probing, so a second XDP consumer on the same interface — another \
+                 validator, or another product — settles above the first one on its own. Set it \
+                 to pin the range instead, which is worth doing when interrupt affinity is \
+                 tuned by hand: probing is first-come-first-served and depends on start order",
             ),
     )
     .arg(
@@ -1376,7 +1428,25 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .long("xdp-zero-copy")
             .takes_value(false)
             .conflicts_with("no_xdp")
-            .help("Enable XDP zero copy mode. Requires hardware and driver support"),
+            .help(
+                "Enable XDP zero copy. Requires hardware and driver support, and makes \
+                 the receive path mandatory: what would otherwise be given up with a \
+                 warning becomes a refusal to start",
+            ),
+    )
+    .arg(
+        Arg::with_name("xdp_chain_loading")
+            .long("xdp-chain-loading")
+            .takes_value(false)
+            .conflicts_with("no_xdp")
+            .help(
+                "Install the XDP program via a dispatcher so other XDP programs can \
+                 coexist on the same interface (chain loading), instead of taking the \
+                 interface's XDP hook exclusively. Adds a small per-packet dispatcher \
+                 cost, and needs cap_sys_admin. Not needed to recover from a previous \
+                 chain-loaded run: an exclusive start removes its own leftover program \
+                 by itself",
+            ),
     )
     .args(&pub_sub_config::args(/*test_validator:*/ false))
     .args(&json_rpc_config::args())

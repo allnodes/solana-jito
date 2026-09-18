@@ -28,6 +28,19 @@ const NLA_HDR_LEN: usize = align_to(mem::size_of::<nlattr>(), NLA_ALIGNTO as usi
 const IFLA_MTU: u16 = 4;
 
 // GRE nested attributes (from include/uapi/linux/if_tunnel.h)
+const IFLA_XDP: u16 = 43;
+const IFLA_XDP_FD: u16 = 1;
+const IFLA_XDP_ATTACHED: u16 = 2;
+const IFLA_XDP_FLAGS: u16 = 3;
+const IFLA_XDP_PROG_ID: u16 = 4;
+const IFLA_XDP_EXPECTED_FD: u16 = 8;
+const NLA_F_NESTED: u16 = 0x8000;
+const XDP_FLAGS_UPDATE_IF_NOEXIST: u32 = 1 << 0;
+const XDP_FLAGS_SKB_MODE: u32 = 1 << 1;
+const XDP_FLAGS_DRV_MODE: u32 = 1 << 2;
+const XDP_FLAGS_REPLACE: u32 = 1 << 4;
+const XDP_ATTACHED_SKB: u8 = 2;
+
 const IFLA_GRE_LOCAL: u16 = 6;
 const IFLA_GRE_REMOTE: u16 = 7;
 const IFLA_GRE_TTL: u16 = 8;
@@ -447,6 +460,122 @@ pub fn netlink_get_interfaces(family: u8) -> Result<Vec<InterfaceInfo>, io::Erro
     }
 
     Ok(interfaces)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct XdpAttachment {
+    pub prog_id: u32,
+    pub drv: bool,
+}
+
+pub fn xdp_attachment(if_index: u32) -> Result<Option<XdpAttachment>, io::Error> {
+    let sock = NetlinkSocket::open()?;
+    let mut req = unsafe { mem::zeroed::<InterfaceRequest>() };
+    let nlmsg_len = mem::size_of::<nlmsghdr>() + mem::size_of::<ifinfomsg>();
+    req.header = nlmsghdr {
+        nlmsg_len: nlmsg_len as u32,
+        nlmsg_flags: (NLM_F_REQUEST | NLM_F_DUMP) as u16,
+        nlmsg_type: RTM_GETLINK,
+        nlmsg_pid: 0,
+        nlmsg_seq: 1,
+    };
+    sock.send(&bytes_of(&req)[..req.header.nlmsg_len as usize])?;
+
+    for msg in sock.recv()? {
+        if msg.header.nlmsg_type != RTM_NEWLINK
+            || msg.data.len() < mem::size_of::<ifinfomsg>()
+        {
+            continue;
+        }
+        let ifi = unsafe { ptr::read_unaligned(msg.data.as_ptr() as *const ifinfomsg) };
+        if ifi.ifi_index != if_index {
+            continue;
+        }
+        let Ok(attrs) = parse_attrs(&msg.data[mem::size_of::<ifinfomsg>()..]) else {
+            return Ok(None);
+        };
+        let Some(xdp) = attrs.get(&IFLA_XDP) else {
+            return Ok(None);
+        };
+        let Ok(nested) = parse_attrs(xdp.data) else {
+            return Ok(None);
+        };
+        let Some(prog_id) = nested
+            .get(&IFLA_XDP_PROG_ID)
+            .and_then(|a| a.data.get(..4))
+            .map(|b| u32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
+            .filter(|id| *id != 0)
+        else {
+            return Ok(None);
+        };
+        let drv = nested
+            .get(&IFLA_XDP_ATTACHED)
+            .and_then(|a| a.data.first().copied())
+            .map(|mode| mode != XDP_ATTACHED_SKB)
+            .unwrap_or(true);
+        return Ok(Some(XdpAttachment { prog_id, drv }));
+    }
+    Ok(None)
+}
+
+pub fn xdp_prog_id(if_index: u32) -> Result<Option<u32>, io::Error> {
+    Ok(xdp_attachment(if_index)?.map(|a| a.prog_id))
+}
+
+pub fn netlink_attach_xdp(
+    if_index: u32,
+    prog_fd: RawFd,
+    drv: bool,
+    expected: Option<RawFd>,
+) -> io::Result<()> {
+    let mode = if drv { XDP_FLAGS_DRV_MODE } else { XDP_FLAGS_SKB_MODE };
+    match expected {
+        None => netlink_set_xdp(if_index, prog_fd, mode | XDP_FLAGS_UPDATE_IF_NOEXIST, None),
+        Some(old) => netlink_set_xdp(if_index, prog_fd, mode | XDP_FLAGS_REPLACE, Some(old)),
+    }
+}
+
+pub fn netlink_detach_xdp(if_index: u32, drv: bool) -> io::Result<()> {
+    let mode = if drv { XDP_FLAGS_DRV_MODE } else { XDP_FLAGS_SKB_MODE };
+    netlink_set_xdp(if_index, -1, mode, None)
+}
+
+fn netlink_set_xdp(
+    if_index: u32,
+    prog_fd: RawFd,
+    flags: u32,
+    expected_fd: Option<RawFd>,
+) -> io::Result<()> {
+    let sock = NetlinkSocket::open()?;
+
+    let mut buf: Vec<u8> = Vec::with_capacity(64);
+    buf.extend_from_slice(&0u32.to_ne_bytes());
+    buf.extend_from_slice(&libc::RTM_SETLINK.to_ne_bytes());
+    buf.extend_from_slice(&((NLM_F_REQUEST | libc::NLM_F_ACK) as u16).to_ne_bytes());
+    buf.extend_from_slice(&1u32.to_ne_bytes());
+    buf.extend_from_slice(&0u32.to_ne_bytes());
+    buf.push(0);
+    buf.push(0);
+    buf.extend_from_slice(&0u16.to_ne_bytes());
+    buf.extend_from_slice(&(if_index as i32).to_ne_bytes());
+    buf.extend_from_slice(&0u32.to_ne_bytes());
+    buf.extend_from_slice(&0u32.to_ne_bytes());
+    let nest = buf.len();
+    buf.extend_from_slice(&0u16.to_ne_bytes());
+    buf.extend_from_slice(&(IFLA_XDP | NLA_F_NESTED).to_ne_bytes());
+    push_nlattr(&mut buf, IFLA_XDP_FD, &prog_fd);
+    push_nlattr(&mut buf, IFLA_XDP_FLAGS, &flags);
+    if let Some(old) = expected_fd {
+        push_nlattr(&mut buf, IFLA_XDP_EXPECTED_FD, &old);
+    }
+    let outer_len = (buf.len() - nest) as u16;
+    buf[nest..nest + 2].copy_from_slice(&outer_len.to_ne_bytes());
+    let total = buf.len() as u32;
+    buf[0..4].copy_from_slice(&total.to_ne_bytes());
+
+    sock.send(&buf)?;
+    sock.recv()?;
+    Ok(())
 }
 
 pub(crate) fn parse_rtm_ifinfomsg(msg: &NetlinkMessage) -> Option<InterfaceInfo> {

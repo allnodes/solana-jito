@@ -8,6 +8,7 @@
 //! command-line tools to spin up validators and a Rust library
 //!
 
+pub mod allnodes;
 pub mod admin_rpc_post_init;
 pub mod bam_connection;
 pub mod bam_dependencies;

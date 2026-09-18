@@ -149,6 +149,16 @@ impl BlockhashQueue {
         })
     }
 
+    pub fn recent_hashes_n(&self, n: usize) -> Vec<Hash> {
+        let mut pairs: Vec<(u64, Hash)> = self
+            .hashes
+            .iter()
+            .map(|(h, info)| (info.hash_index, *h))
+            .collect();
+        pairs.sort_unstable_by_key(|(idx, _)| std::cmp::Reverse(*idx));
+        pairs.into_iter().take(n).map(|(_, h)| h).collect()
+    }
+
     #[deprecated(
         since = "2.0.0",
         note = "Please use `solana_clock::MAX_PROCESSING_AGE`"

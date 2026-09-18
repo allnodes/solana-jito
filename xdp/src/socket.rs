@@ -30,6 +30,23 @@ pub struct Socket<U: Umem> {
     umem: U,
 }
 
+#[cfg(target_os = "linux")]
+fn iface_name_and_mtu(if_index: u32) -> Option<(String, u32)> {
+    let mut buf = [0u8; libc::IF_NAMESIZE];
+    let p = unsafe { libc::if_indextoname(if_index, buf.as_mut_ptr() as *mut libc::c_char) };
+    if p.is_null() {
+        return None;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let name = String::from_utf8(buf[..end].to_vec()).ok()?;
+    let mtu = std::fs::read_to_string(format!("/sys/class/net/{name}/mtu"))
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()?;
+    Some((name, mtu))
+}
+
 impl<U: Umem> Socket<U> {
     #[allow(clippy::type_complexity)]
     pub fn new(
@@ -143,9 +160,7 @@ impl<U: Umem> Socket<U> {
                 fd.as_raw_fd(),
             );
 
-            if zero_copy {
-                // most drivers (intel) are buggy if ZC is enabled and the fill ring is not
-                // pre-populated before calling bind()
+            if zero_copy || rx_ring_size > 0 {
                 for _ in 0..rx_fill_ring_size {
                     let Some(frame) = umem.reserve() else {
                         return Err(Error::InsufficientUmemFrames {
@@ -204,12 +219,36 @@ impl<U: Umem> Socket<U> {
                 mem::size_of::<sockaddr_xdp>() as socklen_t,
             ) < 0
             {
+                let err = io::Error::last_os_error();
+                let hint = if err.raw_os_error() == Some(libc::EBUSY) {
+                    ", which already has an AF_XDP socket bound to it. A queue takes only one: \
+                     give this instance a range of its own with --xdp-queue-base"
+                        .to_string()
+                } else {
+                    String::new()
+                };
+                let hint = if hint.is_empty()
+                    && zero_copy
+                    && err.raw_os_error() == Some(libc::EINVAL)
+                {
+                    match iface_name_and_mtu(sxdp.sxdp_ifindex) {
+                        Some((name, mtu)) => format!(
+                            ". A zero-copy bind fails this way when the interface MTU does not \
+                             fit in one UMEM frame: {name} has MTU {mtu} and the frame is {} \
+                             bytes. Lower the MTU on the interface, or run without zero copy",
+                            umem.frame_size()
+                        ),
+                        None => String::new(),
+                    }
+                } else {
+                    hint
+                };
                 return Err(Error::syscall(
                     format!(
-                        "bind(AF_XDP, ifindex={}, queue={}, flags=0x{:x}) failed",
+                        "bind(AF_XDP, ifindex={}, queue={}, flags=0x{:x}) failed{hint}",
                         sxdp.sxdp_ifindex, sxdp.sxdp_queue_id, sxdp.sxdp_flags
                     ),
-                    io::Error::last_os_error(),
+                    err,
                 )
                 .into());
             }
@@ -271,7 +310,7 @@ impl<U: Umem> Socket<U> {
         fill_size: usize,
         ring_size: usize,
     ) -> Result<(Self, Rx<U::Frame>), io::Error> {
-        let (socket, rx, _) = Self::new(queue, umem, zero_copy, fill_size, ring_size, 0, 0)?;
+        let (socket, rx, _) = Self::new(queue, umem, zero_copy, fill_size, ring_size, 1, 1)?;
         Ok((socket, rx))
     }
 
@@ -368,8 +407,13 @@ impl<F: Frame> TxRing<F> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RxDescriptor {
+    pub addr: u64,
+    pub len: u32,
+}
+
 pub struct RxRing {
-    #[allow(dead_code)]
     mmap: RingMmap<XdpDesc>,
     consumer: RingConsumer,
     size: u32,
@@ -394,6 +438,15 @@ impl RxRing {
 
     pub fn available(&self) -> usize {
         self.consumer.available() as usize
+    }
+
+    pub fn read(&mut self) -> Option<RxDescriptor> {
+        let index = (self.consumer.consume()? & self.size.saturating_sub(1)) as usize;
+        let desc = unsafe { &*self.mmap.desc.add(index) };
+        Some(RxDescriptor {
+            addr: desc.addr,
+            len: desc.len,
+        })
     }
 
     pub fn commit(&mut self) {

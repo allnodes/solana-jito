@@ -267,6 +267,50 @@ fn calculate_ip_checksum(header: &[u8]) -> u16 {
     !(sum as u16)
 }
 
+pub struct UdpFrame<'a> {
+    pub src: std::net::SocketAddrV4,
+    pub dst: std::net::SocketAddrV4,
+    pub payload: &'a [u8],
+}
+
+pub fn parse_udp_frame(frame: &[u8]) -> Option<UdpFrame<'_>> {
+    if frame.len() < ETH_HEADER_SIZE {
+        return None;
+    }
+    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+    if ethertype != ETH_P_IP as u16 {
+        return None;
+    }
+
+    let ip = &frame[ETH_HEADER_SIZE..];
+    if ip.len() < IP_HEADER_SIZE || ip[0] >> 4 != 4 {
+        return None;
+    }
+    let ihl = (ip[0] & 0x0f) as usize * 4;
+    if ihl < IP_HEADER_SIZE || ip.len() < ihl || ip[9] != IPPROTO_UDP as u8 {
+        return None;
+    }
+    let src_ip = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
+    let dst_ip = Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
+
+    let udp = &ip[ihl..];
+    if udp.len() < UDP_HEADER_SIZE {
+        return None;
+    }
+    let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+    let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+    let udp_len = (u16::from_be_bytes([udp[4], udp[5]]) as usize)
+        .max(UDP_HEADER_SIZE)
+        .min(udp.len());
+
+    Some(UdpFrame {
+        src: std::net::SocketAddrV4::new(src_ip, src_port),
+        dst: std::net::SocketAddrV4::new(dst_ip, dst_port),
+        payload: &udp[UDP_HEADER_SIZE..udp_len],
+    })
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

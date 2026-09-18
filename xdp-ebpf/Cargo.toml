@@ -7,7 +7,7 @@ repository = { workspace = true }
 homepage = { workspace = true }
 license = { workspace = true }
 edition = { workspace = true }
-include = ["Cargo.toml", "src/**", "README", "agave-xdp-prog"]
+include = ["Cargo.toml", "src/**", "README", "agave-xdp-prog", "agave-xdp-dispatcher"]
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
@@ -17,6 +17,11 @@ rustdoc-args = ["--cfg=docsrs"]
 [[bin]]
 name = "agave-xdp-prog"
 path = "src/bin/agave-xdp-prog.rs"
+required-features = ["ebpf"]
+
+[[bin]]
+name = "agave-xdp-dispatcher"
+path = "src/bin/agave-xdp-dispatcher.rs"
 required-features = ["ebpf"]
 
 [features]
