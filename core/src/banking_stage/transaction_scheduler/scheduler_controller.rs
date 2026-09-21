@@ -236,7 +236,7 @@ where
         bam_enabled: Arc<AtomicU8>,
     ) -> Self {
         priority_floor.clear();
-        let container_capacity = TOTAL_BUFFERED_PACKETS;
+        let container_capacity = *TOTAL_BUFFERED_PACKETS;
         let saturation_state = SaturationState::new(priority_floor, container_capacity);
         Self {
             exit,
@@ -1546,7 +1546,7 @@ mod saturation_state_tests {
 
     fn make_state() -> (SaturationState, Arc<SchedulerPriorityFloor>) {
         let priority_floor = Arc::new(SchedulerPriorityFloor::new());
-        let state = SaturationState::new(priority_floor.clone(), TOTAL_BUFFERED_PACKETS);
+        let state = SaturationState::new(priority_floor.clone(), *TOTAL_BUFFERED_PACKETS);
         (state, priority_floor)
     }
 
@@ -1614,7 +1614,7 @@ mod saturation_state_tests {
         // tear-down must clear any stale value.
         let floor = Arc::new(SchedulerPriorityFloor::new());
         {
-            let state = SaturationState::new(floor.clone(), TOTAL_BUFFERED_PACKETS);
+            let state = SaturationState::new(floor.clone(), *TOTAL_BUFFERED_PACKETS);
             state.publish_floor(123);
             assert_eq!(floor.get(), 123);
         }

@@ -224,6 +224,7 @@ pub struct ForkStats {
     pub lockout_intervals: LockoutIntervals,
     pub bank_hash: Option<Hash>,
     pub my_latest_landed_vote: Option<Slot>,
+    pub is_mostly_confirmed: bool,
 }
 
 impl ForkStats {

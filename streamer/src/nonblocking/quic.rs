@@ -170,9 +170,10 @@ where
                 socket,
                 fallback_src_ip,
                 xdp_sender,
+                xsk,
             }) => {
                 let socket = Arc::new(
-                    QuicXdpTxSocket::new(socket, fallback_src_ip, xdp_sender)
+                    QuicXdpTxSocket::new(socket, fallback_src_ip, xdp_sender, xsk)
                         .map_err(QuicServerError::EndpointFailed)?,
                 ) as Arc<dyn AsyncUdpSocket>;
                 Endpoint::new_with_abstract_socket(
