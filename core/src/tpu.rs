@@ -610,13 +610,31 @@ impl Tpu {
 fn into_quic_sockets(
     sockets: impl IntoIterator<Item = UdpSocket>,
     quic_xdp_sender: Option<(XdpSender, Ipv4Addr)>,
-) -> impl Iterator<Item = QuicSocket> {
+) -> Vec<QuicSocket> {
+    let sockets: Vec<UdpSocket> = sockets.into_iter().collect();
+    #[cfg(target_os = "linux")]
+    let mut xsk_iter = sockets
+        .first()
+        .and_then(|socket| socket.local_addr().ok())
+        .map(|addr| solana_streamer::xdp_quic::attach(addr.port()))
+        .unwrap_or_default()
+        .into_iter();
     sockets
         .into_iter()
         .map(move |socket| match &quic_xdp_sender {
             Some((xdp_sender, fallback_src_ip)) => {
+                #[cfg(target_os = "linux")]
+                if let Some(xsk) = xsk_iter.next() {
+                    return QuicSocket::with_xdp_duplex(
+                        socket,
+                        *fallback_src_ip,
+                        xdp_sender.clone(),
+                        Box::new(xsk),
+                    );
+                }
                 QuicSocket::with_xdp(socket, *fallback_src_ip, xdp_sender.clone())
             }
             None => QuicSocket::from(socket),
         })
+        .collect()
 }

@@ -54,6 +54,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { workspace = true }
+
 [dev-dependencies]
 agave-logger = { path = "../logger", features = ["agave-unstable-api"] }
 anyhow = { workspace = true }

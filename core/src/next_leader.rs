@@ -13,6 +13,7 @@ use {
 
 /// Returns a list of tpu vote sockets for the leaders of the next N fanout
 /// slots. Leaders and sockets are deduped.
+#[allow(dead_code)]
 pub(crate) fn upcoming_leader_tpu_vote_sockets(
     cluster_info: &ClusterInfo,
     poh_recorder: &RwLock<PohRecorder>,
