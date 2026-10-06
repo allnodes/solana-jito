@@ -1,3 +1,4 @@
+pub mod allnodes;
 pub mod authorized_voter;
 pub mod bam;
 pub mod block_engine;
@@ -11,6 +12,7 @@ pub mod plugin;
 pub mod relayer;
 pub mod repair_shred_from_peer;
 pub mod repair_whitelist;
+pub mod reset_xdp_interface;
 pub mod run;
 pub mod set_identity;
 pub mod set_log_filter;
