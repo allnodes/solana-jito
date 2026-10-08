@@ -62,6 +62,7 @@ pub struct ForwardingClientConfig<'a> {
 /// Maximum forwarding rate in bytes per second.
 const MAX_BYTES_PER_SECOND: u64 = 12_000_000;
 
+allnodes_client::constants! {
 /// Maximum number of transactions collected before forwarding a batch.
 ///
 /// Value chosen because it was used historically, at some point
@@ -70,10 +71,10 @@ const MAX_BYTES_PER_SECOND: u64 = 12_000_000;
 const FORWARD_BATCH_SIZE: usize = 128;
 
 /// Scheduler channel capacity in transactions.
-const SCHEDULER_CHANNEL_CAPACITY: usize = FORWARD_BATCH_SIZE;
+const SCHEDULER_CHANNEL_CAPACITY: usize = *FORWARD_BATCH_SIZE;
 
 /// Worker channel capacity in transactions.
-const WORKER_CHANNEL_CAPACITY: usize = FORWARD_BATCH_SIZE;
+const WORKER_CHANNEL_CAPACITY: usize = *FORWARD_BATCH_SIZE;
 
 /// How far ahead to look in the leader schedule when determining forwarding
 /// addresses. The unit is `NUM_CONSECUTIVE_LEADER_SLOTS`.
@@ -85,6 +86,7 @@ const WORKER_CHANNEL_CAPACITY: usize = FORWARD_BATCH_SIZE;
 /// The value is chosen to ensure that the likelihood of the same leader occupying
 /// all lookahead slots is negligible.
 const NUM_LOOKAHEAD_LEADERS: u64 = 3;
+}
 
 /// [`ForwardAddressGetter`] provides helper methods for retrieving forwarding
 /// addresses for both vote and non-vote transactions.
@@ -341,8 +343,8 @@ impl<VoteClient: ForwardingClient, NonVoteClient: ForwardingClient>
     fn forward_buffered_packets(&mut self) {
         self.metrics.did_something |= !self.packet_container.is_empty();
 
-        let mut non_vote_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
-        let mut vote_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
+        let mut non_vote_batch = Vec::with_capacity(*FORWARD_BATCH_SIZE);
+        let mut vote_batch = Vec::with_capacity(*FORWARD_BATCH_SIZE);
 
         // determine the client to use for next batch based on current active interface
         // use primary interface bind (index 0) if not in multihoming context.
@@ -465,7 +467,7 @@ impl VoteClient {
     fn get_next_valid_leader(&self) -> Option<SocketAddr> {
         let node_addresses = self
             .forward_address_getter
-            .get_vote_forwarding_addresses(NUM_LOOKAHEAD_LEADERS);
+            .get_vote_forwarding_addresses(*NUM_LOOKAHEAD_LEADERS);
         node_addresses.first().copied()
     }
 }
@@ -512,7 +514,7 @@ impl TpuClientNextClient {
         cancel: CancellationToken,
     ) -> Self {
         // For now use large channel, the more suitable size to be found later.
-        let (sender, receiver) = mpsc::channel(SCHEDULER_CHANNEL_CAPACITY);
+        let (sender, receiver) = mpsc::channel(*SCHEDULER_CHANNEL_CAPACITY);
         let leader_updater = forward_address_getter;
 
         let config = Self::create_config(bind_socket, stake_identity);
@@ -546,7 +548,7 @@ impl TpuClientNextClient {
             // Cache size of 128 covers all nodes above the P90 slot count threshold,
             // which together account for ~75% of total slots in the epoch.
             num_connections: NonZeroUsize::new(128).unwrap(),
-            worker_channel_size: WORKER_CHANNEL_CAPACITY,
+            worker_channel_size: *WORKER_CHANNEL_CAPACITY,
             max_reconnect_attempts: 4,
             // Send to the next leader only, but verify that connections exist
             // for the leaders of the next `4 * NUM_CONSECUTIVE_SLOTS`.
@@ -645,14 +647,14 @@ fn send_batch_if_full(
     forwarded_counter: &mut usize,
     dropped_counter: &mut usize,
 ) {
-    if batch.len() == FORWARD_BATCH_SIZE {
+    if batch.len() == *FORWARD_BATCH_SIZE {
         *forwarded_counter += batch.len();
 
-        let mut swap_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
+        let mut swap_batch = Vec::with_capacity(*FORWARD_BATCH_SIZE);
         std::mem::swap(batch, &mut swap_batch);
 
         if client.send_transactions_in_batch(swap_batch).is_err() {
-            *dropped_counter += FORWARD_BATCH_SIZE;
+            *dropped_counter += *FORWARD_BATCH_SIZE;
         }
     }
 }
