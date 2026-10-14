@@ -153,9 +153,11 @@ impl SwitchForkDecision {
     }
 }
 
+allnodes_client::constants! {
 const VOTE_THRESHOLD_DEPTH_SHALLOW: usize = 4;
 pub const VOTE_THRESHOLD_DEPTH: usize = 8;
 pub const SWITCH_FORK_THRESHOLD: f64 = 0.38;
+}
 
 pub type Result<T> = std::result::Result<T, TowerError>;
 
@@ -242,7 +244,7 @@ impl Default for Tower {
     fn default() -> Self {
         let mut tower = Self {
             node_pubkey: Pubkey::default(),
-            threshold_depth: VOTE_THRESHOLD_DEPTH,
+            threshold_depth: *VOTE_THRESHOLD_DEPTH,
             threshold_size: VOTE_THRESHOLD_SIZE,
             vote_state: TowerVoteState::default(),
             last_vote: VoteTransaction::from(TowerSync::default()),
@@ -602,7 +604,7 @@ impl Tower {
     ) -> bool {
         voted_stakes
             .get(&slot)
-            .map(|stake| (*stake as f64 / total_stake as f64) > DUPLICATE_THRESHOLD)
+            .map(|stake| (*stake as f64 / total_stake as f64) > *DUPLICATE_THRESHOLD)
             .unwrap_or(false)
     }
 
@@ -670,7 +672,7 @@ impl Tower {
         vote_account.vote_state_view().last_voted_slot()
     }
 
-    pub fn record_bank_vote(&mut self, bank: &Bank) -> Option<Slot> {
+    pub fn record_bank_vote(&mut self, bank: &Bank, pop_expired: bool) -> Option<Slot> {
         // Returns the new root if one is made after applying a vote for the given bank to
         // `self.vote_state`
         let block_id = bank.block_id().unwrap_or_else(|| {
@@ -680,7 +682,12 @@ impl Tower {
             // here that this is our leader bank.
             Hash::default()
         });
-        self.record_bank_vote_and_update_lockouts(bank.slot(), bank.hash(), block_id)
+        self.record_bank_vote_and_update_lockouts(
+            bank.slot(),
+            bank.hash(),
+            pop_expired,
+            block_id,
+        )
     }
 
     /// If we've recently updated the vote state by applying a new vote
@@ -701,6 +708,7 @@ impl Tower {
         &mut self,
         vote_slot: Slot,
         vote_hash: Hash,
+        pop_expired: bool,
         block_id: Hash,
     ) -> Option<Slot> {
         if let Some(last_voted_slot) = self.vote_state.last_voted_slot()
@@ -717,7 +725,8 @@ impl Tower {
         trace!("{} record_vote for {}", self.node_pubkey, vote_slot);
         let old_root = self.root();
 
-        self.vote_state.process_next_vote_slot(vote_slot);
+        self.vote_state
+            .process_next_vote_slot_may_pop_expired(vote_slot, pop_expired);
         self.update_last_vote_from_vote_state(vote_hash, block_id);
 
         let new_root = self.root();
@@ -736,7 +745,7 @@ impl Tower {
 
     #[cfg(feature = "dev-context-only-utils")]
     pub fn record_vote(&mut self, slot: Slot, hash: Hash) -> Option<Slot> {
-        self.record_bank_vote_and_update_lockouts(slot, hash, Hash::default())
+        self.record_bank_vote_and_update_lockouts(slot, hash, true, Hash::default())
     }
 
     #[cfg(feature = "dev-context-only-utils")]
@@ -1209,7 +1218,7 @@ impl Tower {
                         .map(|(stake, _)| *stake)
                         .unwrap_or(0);
                     locked_out_stake += stake;
-                    if (locked_out_stake as f64 / total_stake as f64) > SWITCH_FORK_THRESHOLD {
+                    if (locked_out_stake as f64 / total_stake as f64) > *SWITCH_FORK_THRESHOLD {
                         return SwitchForkDecision::SwitchProof(switch_proof);
                     }
                     locked_out_vote_accounts.insert(vote_account_pubkey);
@@ -1262,7 +1271,7 @@ impl Tower {
                     .map(|(stake, _)| *stake)
                     .unwrap_or(0);
                 locked_out_stake += stake;
-                if (locked_out_stake as f64 / total_stake as f64) > SWITCH_FORK_THRESHOLD {
+                if (locked_out_stake as f64 / total_stake as f64) > *SWITCH_FORK_THRESHOLD {
                     return SwitchForkDecision::SwitchProof(switch_proof);
                 }
                 locked_out_vote_accounts.insert(vote_account_pubkey);
@@ -1386,8 +1395,8 @@ impl Tower {
             // purposes. We wish to impose a shallow threshold check to prevent the frequent 8 deep
             // lockouts seen multiple times a day. We check both the 4th and 5th deep here to collect
             // metrics to determine the right depth and threshold percentage to set in the future.
-            (VOTE_THRESHOLD_DEPTH_SHALLOW, SWITCH_FORK_THRESHOLD),
-            (VOTE_THRESHOLD_DEPTH_SHALLOW + 1, SWITCH_FORK_THRESHOLD),
+            (*VOTE_THRESHOLD_DEPTH_SHALLOW, *SWITCH_FORK_THRESHOLD),
+            (*VOTE_THRESHOLD_DEPTH_SHALLOW + 1, *SWITCH_FORK_THRESHOLD),
             (self.threshold_depth, self.threshold_size),
         ];
 

@@ -239,6 +239,14 @@ impl Default for RpcBigtableConfig {
     }
 }
 
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 #[derive(Clone)]
 pub struct JsonRpcRequestProcessor {
     bank_forks: Arc<RwLock<BankForks>>,
@@ -320,10 +328,21 @@ impl JsonRpcRequestProcessor {
         let index_key = index_key.to_owned();
         let program_id = program_id.to_owned();
         let byte_limit_for_scans = self.config.scan_results_limit_bytes;
+        let bank_for_scan = Arc::downgrade(&bank);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let _cancel_on_drop = CancelOnDrop(cancel.clone());
         let mut accounts = self
             .runtime
             .spawn_blocking(move || {
-                bank.get_filtered_indexed_accounts(
+                let bank = match bank_for_scan.upgrade() {
+                    Some(bank) if !cancel.load(Ordering::Relaxed) => bank,
+                    _ => {
+                        return Err(solana_accounts_db::accounts_scan::ScanError::Aborted(
+                            "The request was canceled before the scan began".to_string(),
+                        ));
+                    }
+                };
+                bank.get_filtered_indexed_accounts_with_abort(
                     &index_key,
                     |account| {
                         // The program-id account index checks for Account owner on inclusion.
@@ -337,6 +356,7 @@ impl JsonRpcRequestProcessor {
                                 .all(|filter_type| filter_allows(filter_type, account))
                     },
                     byte_limit_for_scans,
+                    Some(cancel),
                 )
             })
             .await
