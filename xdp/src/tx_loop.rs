@@ -18,20 +18,15 @@ use {
         umem::{Frame, OwnedUmem, PageAlignedMemory, Umem},
     },
     agave_cpu_utils::set_cpu_affinity,
-    crossbeam_queue::ArrayQueue,
+    crossbeam_channel::{Receiver, TryRecvError},
     libc::{_SC_PAGESIZE, sysconf},
     std::{
-        error::Error,
-        fmt, io,
+        io,
         net::{IpAddr, SocketAddr, SocketAddrV4},
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        thread,
         time::Duration,
     },
 };
+
 
 pub struct TxLoopConfigBuilder {
     zero_copy: bool,
@@ -219,127 +214,45 @@ pub trait TxPacket {
     fn allow_mtu_overflow(&self) -> bool;
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum TryRecvError {
-    Empty,
-    Disconnected,
+#[derive(Default)]
+struct TxStats {
+    tx: u64,
+    drop_no_route: u64,
+    drop_no_mac: u64,
+    drop_gre: u64,
+    commit_full: u64,
+    commit_idle: u64,
+    commit_ring: u64,
+    commit_residual: u64,
+    committed: u64,
+    drop_ring_stalled: u64,
 }
 
-pub enum TrySendError<T> {
-    Full(T),
-    Disconnected(T),
-}
-
-impl<T> fmt::Debug for TrySendError<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Full(_) => f.write_str("Full(..)"),
-            Self::Disconnected(_) => f.write_str("Disconnected(..)"),
-        }
-    }
-}
-
-impl<T> fmt::Display for TrySendError<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Full(_) => f.write_str("sending into a full XDP transmit channel"),
-            Self::Disconnected(_) => f.write_str("sending into a closed XDP transmit channel"),
-        }
-    }
-}
-
-impl<T> Error for TrySendError<T> {}
-
-pub trait Receiver<T> {
-    fn try_recv(&self) -> Result<T, TryRecvError>;
-}
-
-pub struct TxSender<T> {
-    queue: Arc<SharedQueue<T>>,
-}
-
-pub struct TxReceiver<T> {
-    queue: Arc<SharedQueue<T>>,
-}
-
-struct SharedQueue<T> {
-    queue: ArrayQueue<T>,
-    senders: AtomicUsize,
-    receivers: AtomicUsize,
-}
-
-pub fn channel<T>(capacity: usize) -> (TxSender<T>, TxReceiver<T>) {
-    let queue = Arc::new(SharedQueue {
-        queue: ArrayQueue::new(capacity),
-        senders: AtomicUsize::new(1),
-        receivers: AtomicUsize::new(1),
-    });
-    (
-        TxSender {
-            queue: Arc::clone(&queue),
-        },
-        TxReceiver { queue },
-    )
-}
-
-impl<T> Clone for TxSender<T> {
-    fn clone(&self) -> Self {
-        self.queue.senders.fetch_add(1, Ordering::Relaxed);
-        Self {
-            queue: Arc::clone(&self.queue),
-        }
-    }
-}
-
-impl<T> Drop for TxSender<T> {
-    fn drop(&mut self) {
-        self.queue.senders.fetch_sub(1, Ordering::Release);
-    }
-}
-
-impl<T> TxSender<T> {
-    pub fn try_send(&self, item: T) -> Result<(), TrySendError<T>> {
-        if self.queue.receivers.load(Ordering::Relaxed) == 0 {
-            return Err(TrySendError::Disconnected(item));
-        }
-        self.queue.queue.push(item).map_err(TrySendError::Full)
-    }
-}
-
-impl<T> Drop for TxReceiver<T> {
-    fn drop(&mut self) {
-        self.queue.receivers.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-impl<T> Receiver<T> for TxReceiver<T> {
-    fn try_recv(&self) -> Result<T, TryRecvError> {
-        if let Some(item) = self.queue.queue.pop() {
-            return Ok(item);
-        }
-        if self.queue.senders.load(Ordering::Acquire) != 0 {
-            return Err(TryRecvError::Empty);
-        }
-        self.queue.queue.pop().ok_or(TryRecvError::Disconnected)
+impl TxStats {
+    fn is_empty(&self) -> bool {
+        self.tx == 0
+            && self.drop_no_route == 0
+            && self.drop_no_mac == 0
+            && self.drop_gre == 0
+            && self.drop_ring_stalled == 0
     }
 }
 
 impl<U: Umem> TxLoop<U> {
-    pub fn run<T, Rx, D, R>(self, receiver: Rx, mut drop_item: D, mut route_fn: R)
+    pub fn run<T, D, R>(self, receiver: Receiver<T>, mut drop_item: D, mut route_fn: R)
     where
         T: TxPacket,
-        Rx: Receiver<T>,
         D: FnMut(T),
         R: FnMut(&IpAddr) -> Option<NextHop>,
     {
         // How long we sleep waiting to receive packets from the channel.
-        const RECV_TIMEOUT: Duration = Duration::from_nanos(1000);
 
         const MAX_TIMEOUTS: usize = 1;
 
-        // Publish TX descriptors in batches to avoid per-packet commits and driver kicks. An idle
-        // timeout commits any partial batch so low rate traffic is not held indefinitely.
-        const BATCH_SIZE: usize = 64;
+        // We try to collect _at least_ BATCH_SIZE packets before queueing into the NIC. This is to
+        // avoid introducing too much per-packet overhead and giving the NIC time to complete work
+        // before we queue the next chunk of packets.
+        const BATCH_SIZE: usize = 63;
 
         let TxLoop {
             cpu_id,
@@ -356,277 +269,397 @@ impl<U: Umem> TxLoop<U> {
         let umem_tx_capacity = umem.available();
         let umem_frame_size = umem.frame_size();
 
+        // Local buffer where we store packets before sending them.
+        let mut batched_items = Vec::with_capacity(BATCH_SIZE);
+
+        // How many packets we've batched. This is _not_ batched_items.len(), but item * peers. For
+        // example if we have 3 packets to transmit to 2 destination addresses each, we have 6 batched
+        // packets.
+        let mut batched_packets = 0;
         // How many descriptors are written into the TX ring but not yet committed.
         let mut written_uncommitted = 0;
 
+        const REPORT_INTERVAL: Duration = Duration::from_secs(10);
+        let mut stats = TxStats::default();
+        let mut last_report = std::time::Instant::now();
+
+        const PARK_TIMEOUT: Duration = Duration::from_micros(100);
+
+        const SPIN_DWELL: Duration = Duration::from_micros(20);
+        const SPIN_REPROBE_EVERY: u32 = 256;
+        let mut park = crossbeam_channel::Select::new();
+        park.recv(&receiver);
+
         let mut timeouts = 0;
+        let mut spin_dwell = SPIN_DWELL;
+        let mut fruitless: u32 = 0;
         loop {
-            let item = match receiver.try_recv() {
+            let mut channel_drained = false;
+            match receiver.try_recv() {
                 Ok(item) => {
+                    batched_packets += item.dst_addrs().as_ref().len();
+                    batched_items.push(item);
                     timeouts = 0;
-                    item
+                    if batched_packets < BATCH_SIZE {
+                        continue;
+                    }
                 }
                 Err(TryRecvError::Empty) => {
-                    if timeouts < MAX_TIMEOUTS {
-                        timeouts += 1;
-                        thread::sleep(RECV_TIMEOUT);
-                    } else {
-                        timeouts = 0;
-                        commit_pending(&mut ring, &mut written_uncommitted);
-                        // we haven't received anything in a while, kick the driver
-                        kick(&ring);
-                    }
-                    continue;
+                    channel_drained = true;
                 }
-                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Disconnected) => {
+                    // keep looping until we've flushed all the packets
+                    if batched_packets == 0 {
+                        break;
+                    }
+                }
             };
 
-            let src_addr = item.src_addr();
-            let src_ip = src_addr.ip();
-            let src_port = src_addr.port();
-            let ecn = item.ecn();
-            let can_overflow_mtu = item.allow_mtu_overflow();
-            for addr in item.dst_addrs().as_ref() {
-                if ring.available() == 0 || umem.available() == 0 {
-                    commit_pending(&mut ring, &mut written_uncommitted);
-                    kick(&ring);
+            for item in batched_items.drain(..) {
+                let src_addr = item.src_addr();
+                let src_ip = src_addr.ip();
+                let src_port = src_addr.port();
+                let ecn = item.ecn();
+                let can_overflow_mtu = item.allow_mtu_overflow();
+                for addr in item.dst_addrs().as_ref() {
+                    if ring.available() == 0 || umem.available() == 0 {
+                        let pending = written_uncommitted;
+                        commit_pending(&mut ring, &mut written_uncommitted);
+                        if pending > 0 {
+                            stats.commit_ring += 1;
+                            stats.committed += pending as u64;
+                        }
+                        kick(&ring);
 
-                    // loop until we have space for the next packet
-                    loop {
-                        completion.sync(true);
-                        // we haven't written any frames so we only need to sync the consumer position
-                        ring.sync(false);
+                        if !wait_for_ring_slot(&mut ring, &mut completion, umem) {
+                            stats.drop_ring_stalled += 1;
+                            batched_packets -= 1;
+                            continue;
+                        }
+                    }
 
-                        // check if any frames were completed
-                        while let Some(frame) = completion.read() {
-                            umem.release_completed(frame);
+                    // at this point we're guaranteed to have a frame to write the next packet into and
+                    // a slot in the ring to submit it
+                    let mut frame = umem.reserve().unwrap();
+                    let IpAddr::V4(dst_ip) = addr.ip() else {
+                        panic!("IPv6 not supported");
+                    };
+
+                    let payload = item.payload().as_ref();
+                    let len = payload.len();
+
+                    let dst = addr.ip();
+                    let Some(next_hop) = route_fn(&dst) else {
+                        log::warn!("dropping packet: no route for peer {addr}");
+                        stats.drop_no_route += 1;
+                        batched_packets -= 1;
+                        umem.release(frame);
+                        continue;
+                    };
+
+                    if let Some(gre) = &next_hop.gre {
+                        let Some(dest_mac) = gre.underlay_mac_addr else {
+                            log::warn!(
+                                "dropping packet: GRE peer {addr} must be routed through {} on \
+                                 if{} which has no known MAC address",
+                                gre.underlay_ip_addr,
+                                gre.underlay_if_index
+                            );
+                            stats.drop_no_mac += 1;
+                            batched_packets -= 1;
+                            umem.release(frame);
+                            continue;
+                        };
+
+                        let l3_inner_packet_len = INNER_PACKET_HEADER_SIZE + len;
+                        let l3_outer_gre_packet_len =
+                            IP_HEADER_SIZE + GRE_HEADER_BASE_SIZE + l3_inner_packet_len;
+
+                        if l3_inner_packet_len > gre.mtu as usize
+                            || l3_outer_gre_packet_len > next_hop.mtu as usize
+                        {
+                            if !can_overflow_mtu {
+                                log::warn!(
+                                    "dropping packet: GRE payload exceeds MTU for {addr}: L3 \
+                                     inner packet length {l3_inner_packet_len}, L3 outer GRE \
+                                     packet length {l3_outer_gre_packet_len}, MTU: {mtu}, \
+                                     underlay_mtu: {underlay_mtu}.",
+                                    mtu = gre.mtu,
+                                    underlay_mtu = next_hop.mtu
+                                );
+                            }
+                            batched_packets -= 1;
+                            umem.release(frame);
+                            continue;
                         }
 
-                        if ring.available() > 0 && umem.available() > 0 {
-                            // we have space for the next packet, break out of the loop
-                            break;
+                        let packet_len = gre_packet_size(len);
+                        if packet_len > umem_frame_size {
+                            log::warn!(
+                                "dropping packet: GRE packet size {packet_len} exceeds frame size \
+                                 {umem_frame_size} for {addr}"
+                            );
+                            batched_packets -= 1;
+                            umem.release(frame);
+                            continue;
                         }
 
-                        // queues are full, if NEEDS_WAKEUP is set kick the driver so hopefully it'll
-                        // complete some work
+                        frame.set_len(packet_len);
+                        let mut packet = umem.map_frame_mut(frame);
+                        let inner_src_ip = next_hop.preferred_src_ip.as_ref().unwrap_or(src_ip);
+                        if let Err(err) = construct_gre_packet(
+                            &mut packet,
+                            &src_mac,
+                            &dest_mac,
+                            inner_src_ip,
+                            &dst_ip,
+                            src_port,
+                            addr.port(),
+                            payload,
+                            ecn,
+                            &gre.tunnel_info,
+                        ) {
+                            log::warn!("dropping packet: {err}");
+                            stats.drop_gre += 1;
+                            batched_packets -= 1;
+                            umem.release(packet.into_frame());
+                            continue;
+                        }
+                        frame = packet.into_frame();
+                    } else if let Some(vlan) = &next_hop.vlan {
+                        // we need the MAC address to send the packet
+                        let Some(dest_mac) = next_hop.mac_addr else {
+                            log::warn!(
+                                "dropping packet: peer {addr} must be routed through {} which has \
+                                 no known MAC address",
+                                next_hop.ip_addr
+                            );
+                            stats.drop_no_mac += 1;
+                            batched_packets -= 1;
+                            umem.release(frame);
+                            continue;
+                        };
+
+                        // The 802.1Q tag is added at L2, so the L3 size compared against the MTU
+                        // is the same as the untagged path.
+                        let l3_packet_len = IP_HEADER_SIZE + UDP_HEADER_SIZE + len;
+                        if l3_packet_len > next_hop.mtu as usize {
+                            if !can_overflow_mtu {
+                                log::warn!(
+                                    "dropping packet: packet size {l3_packet_len} exceeds MTU \
+                                     {mtu} for {addr}",
+                                    mtu = next_hop.mtu
+                                );
+                            }
+                            batched_packets -= 1;
+                            umem.release(frame);
+                            continue;
+                        }
+
+                        let packet_len = VLAN_PACKET_HEADER_SIZE + len;
+                        if packet_len > umem_frame_size {
+                            log::warn!(
+                                "dropping packet: VLAN packet size {packet_len} exceeds frame \
+                                 size {umem_frame_size} for {addr}"
+                            );
+                            batched_packets -= 1;
+                            umem.release(frame);
+                            continue;
+                        }
+
+                        frame.set_len(packet_len);
+                        let mut packet = umem.map_frame_mut(frame);
+
+                        // The route's preferred src is the IP assigned to the VLAN sub-interface,
+                        // which is the right inner src for traffic egressing this VLAN. Fall back
+                        // to the device's src IP if the route did not carry one.
+                        let inner_src_ip = next_hop.preferred_src_ip.as_ref().unwrap_or(src_ip);
+
+                        if !construct_vlan_packet(
+                            &mut packet,
+                            &src_mac.0,
+                            &dest_mac.0,
+                            inner_src_ip,
+                            &dst_ip,
+                            src_port,
+                            addr.port(),
+                            vlan.vid,
+                            vlan.pcp,
+                            payload,
+                            ecn,
+                        ) {
+                            log::warn!("dropping packet: VLAN frame did not fit in UMEM slot");
+                            batched_packets -= 1;
+                            umem.release(packet.into_frame());
+                            continue;
+                        }
+                        frame = packet.into_frame();
+                    } else {
+                        // we need the MAC address to send the packet
+                        let Some(dest_mac) = next_hop.mac_addr else {
+                            log::warn!(
+                                "dropping packet: peer {addr} must be routed through {} which has \
+                                 no known MAC address",
+                                next_hop.ip_addr
+                            );
+                            stats.drop_no_mac += 1;
+                            batched_packets -= 1;
+                            umem.release(frame);
+                            continue;
+                        };
+
+                        let l3_packet_len = IP_HEADER_SIZE + UDP_HEADER_SIZE + len;
+                        if l3_packet_len > next_hop.mtu as usize {
+                            if !can_overflow_mtu {
+                                log::warn!(
+                                    "dropping packet: packet size {l3_packet_len} exceeds MTU \
+                                     {mtu} for {addr}",
+                                    mtu = next_hop.mtu
+                                );
+                            }
+                            batched_packets -= 1;
+                            umem.release(frame);
+                            continue;
+                        }
+
+                        let packet_len = PACKET_HEADER_SIZE + len;
+                        if packet_len > umem_frame_size {
+                            log::warn!(
+                                "dropping packet: packet size {packet_len} exceeds frame size \
+                                 {umem_frame_size} for {addr}"
+                            );
+                            batched_packets -= 1;
+                            umem.release(frame);
+                            continue;
+                        }
+
+                        frame.set_len(packet_len);
+                        let mut packet = umem.map_frame_mut(frame);
+
+                        if !construct_packet(
+                            &mut packet,
+                            &src_mac.0,
+                            &dest_mac.0,
+                            src_ip,
+                            &dst_ip,
+                            src_port,
+                            addr.port(),
+                            payload,
+                            ecn,
+                        ) {
+                            log::warn!("dropping packet: frame did not fit in UMEM slot");
+                            batched_packets -= 1;
+                            umem.release(packet.into_frame());
+                            continue;
+                        }
+                        frame = packet.into_frame();
+                    }
+
+                    ring.write(frame, 0)
+                        .map_err(|_| "ring full")
+                        // this should never happen as we check for available slots above
+                        .expect("failed to write to ring");
+
+                    stats.tx += 1;
+                    batched_packets -= 1;
+                    written_uncommitted += 1;
+
+                    // check if it's time to publish descriptors and kick the driver
+                    if written_uncommitted >= BATCH_SIZE {
+                        stats.commit_full += 1;
+                        stats.committed += written_uncommitted as u64;
+                        commit_pending(&mut ring, &mut written_uncommitted);
                         kick(&ring);
                     }
                 }
+                drop_item(item);
+            }
+            debug_assert_eq!(batched_packets, 0);
 
-                // at this point we're guaranteed to have a frame to write the next packet into and
-                // a slot in the ring to submit it
-                let mut frame = umem.reserve().unwrap();
-                let IpAddr::V4(dst_ip) = addr.ip() else {
-                    panic!("IPv6 not supported");
-                };
-
-                let payload = item.payload().as_ref();
-                let len = payload.len();
-
-                let dst = addr.ip();
-                let Some(next_hop) = route_fn(&dst) else {
-                    log::warn!("dropping packet: no route for peer {addr}");
-                    umem.release(frame);
-                    continue;
-                };
-
-                if let Some(gre) = &next_hop.gre {
-                    let Some(dest_mac) = gre.underlay_mac_addr else {
-                        log::warn!(
-                            "dropping packet: GRE peer {addr} must be routed through {} on if{} \
-                             which has no known MAC address",
-                            gre.underlay_ip_addr,
-                            gre.underlay_if_index
-                        );
-                        umem.release(frame);
-                        continue;
-                    };
-
-                    let l3_inner_packet_len = INNER_PACKET_HEADER_SIZE + len;
-                    let l3_outer_gre_packet_len =
-                        IP_HEADER_SIZE + GRE_HEADER_BASE_SIZE + l3_inner_packet_len;
-
-                    if l3_inner_packet_len > gre.mtu as usize
-                        || l3_outer_gre_packet_len > next_hop.mtu as usize
-                    {
-                        if !can_overflow_mtu {
-                            log::warn!(
-                                "dropping packet: GRE payload exceeds MTU for {addr}: L3 inner \
-                                 packet length {l3_inner_packet_len}, L3 outer GRE packet length \
-                                 {l3_outer_gre_packet_len}, MTU: {mtu}, underlay_mtu: \
-                                 {underlay_mtu}.",
-                                mtu = gre.mtu,
-                                underlay_mtu = next_hop.mtu
-                            );
-                        }
-                        umem.release(frame);
-                        continue;
-                    }
-
-                    let packet_len = gre_packet_size(len);
-                    if packet_len > umem_frame_size {
-                        log::warn!(
-                            "dropping packet: GRE packet size {packet_len} exceeds frame size \
-                             {umem_frame_size} for {addr}"
-                        );
-                        umem.release(frame);
-                        continue;
-                    }
-
-                    frame.set_len(packet_len);
-                    let mut packet = umem.map_frame_mut(frame);
-                    let inner_src_ip = next_hop.preferred_src_ip.as_ref().unwrap_or(src_ip);
-                    if let Err(err) = construct_gre_packet(
-                        &mut packet,
-                        &src_mac,
-                        &dest_mac,
-                        inner_src_ip,
-                        &dst_ip,
-                        src_port,
-                        addr.port(),
-                        payload,
-                        ecn,
-                        &gre.tunnel_info,
-                    ) {
-                        log::warn!("dropping packet: {err}");
-                        umem.release(packet.into_frame());
-                        continue;
-                    }
-                    frame = packet.into_frame();
-                } else if let Some(vlan) = &next_hop.vlan {
-                    // we need the MAC address to send the packet
-                    let Some(dest_mac) = next_hop.mac_addr else {
-                        log::warn!(
-                            "dropping packet: peer {addr} must be routed through {} which has no \
-                             known MAC address",
-                            next_hop.ip_addr
-                        );
-                        umem.release(frame);
-                        continue;
-                    };
-
-                    // The 802.1Q tag is added at L2, so the L3 size compared against the MTU
-                    // is the same as the untagged path.
-                    let l3_packet_len = IP_HEADER_SIZE + UDP_HEADER_SIZE + len;
-                    if l3_packet_len > next_hop.mtu as usize {
-                        if !can_overflow_mtu {
-                            log::warn!(
-                                "dropping packet: packet size {l3_packet_len} exceeds MTU {mtu} \
-                                 for {addr}",
-                                mtu = next_hop.mtu
-                            );
-                        }
-                        umem.release(frame);
-                        continue;
-                    }
-
-                    let packet_len = VLAN_PACKET_HEADER_SIZE + len;
-                    if packet_len > umem_frame_size {
-                        log::warn!(
-                            "dropping packet: VLAN packet size {packet_len} exceeds frame size \
-                             {umem_frame_size} for {addr}"
-                        );
-                        umem.release(frame);
-                        continue;
-                    }
-
-                    frame.set_len(packet_len);
-                    let mut packet = umem.map_frame_mut(frame);
-
-                    // The route's preferred src is the IP assigned to the VLAN sub-interface,
-                    // which is the right inner src for traffic egressing this VLAN. Fall back
-                    // to the device's src IP if the route did not carry one.
-                    let inner_src_ip = next_hop.preferred_src_ip.as_ref().unwrap_or(src_ip);
-
-                    if !construct_vlan_packet(
-                        &mut packet,
-                        &src_mac.0,
-                        &dest_mac.0,
-                        inner_src_ip,
-                        &dst_ip,
-                        src_port,
-                        addr.port(),
-                        vlan.vid,
-                        vlan.pcp,
-                        payload,
-                        ecn,
-                    ) {
-                        log::warn!("dropping packet: VLAN frame did not fit in UMEM slot");
-                        umem.release(packet.into_frame());
-                        continue;
-                    }
-                    frame = packet.into_frame();
+            let pending = written_uncommitted;
+            commit_pending(&mut ring, &mut written_uncommitted);
+            if pending > 0 {
+                if channel_drained {
+                    stats.commit_idle += 1;
                 } else {
-                    // we need the MAC address to send the packet
-                    let Some(dest_mac) = next_hop.mac_addr else {
-                        log::warn!(
-                            "dropping packet: peer {addr} must be routed through {} which has no \
-                             known MAC address",
-                            next_hop.ip_addr
-                        );
-                        umem.release(frame);
-                        continue;
-                    };
+                    stats.commit_residual += 1;
+                }
+                stats.committed += pending as u64;
+            }
+            if pending > 0 || channel_drained {
+                kick(&ring);
+            }
 
-                    let l3_packet_len = IP_HEADER_SIZE + UDP_HEADER_SIZE + len;
-                    if l3_packet_len > next_hop.mtu as usize {
-                        if !can_overflow_mtu {
-                            log::warn!(
-                                "dropping packet: packet size {l3_packet_len} exceeds MTU {mtu} \
-                                 for {addr}",
-                                mtu = next_hop.mtu
-                            );
-                        }
-                        umem.release(frame);
-                        continue;
-                    }
-
-                    let packet_len = PACKET_HEADER_SIZE + len;
-                    if packet_len > umem_frame_size {
-                        log::warn!(
-                            "dropping packet: packet size {packet_len} exceeds frame size \
-                             {umem_frame_size} for {addr}"
-                        );
-                        umem.release(frame);
-                        continue;
-                    }
-
-                    frame.set_len(packet_len);
-                    let mut packet = umem.map_frame_mut(frame);
-
-                    if !construct_packet(
-                        &mut packet,
-                        &src_mac.0,
-                        &dest_mac.0,
-                        src_ip,
-                        &dst_ip,
-                        src_port,
-                        addr.port(),
-                        payload,
-                        ecn,
-                    ) {
-                        log::warn!("dropping packet: frame did not fit in UMEM slot");
-                        umem.release(packet.into_frame());
-                        continue;
-                    }
-                    frame = packet.into_frame();
+            if channel_drained {
+                completion.sync(true);
+                ring.sync(false);
+                while let Some(frame_offset) = completion.read() {
+                    umem.release_completed(frame_offset);
                 }
 
-                ring.write(frame, 0)
-                    .map_err(|_| "ring full")
-                    // this should never happen as we check for available slots above
-                    .expect("failed to write to ring");
+                if spin_dwell.is_zero() {
+                    fruitless = fruitless.wrapping_add(1);
+                    if fruitless.is_multiple_of(SPIN_REPROBE_EVERY) {
+                        spin_dwell = SPIN_DWELL;
+                    }
+                }
+                if !spin_dwell.is_zero() {
+                    let until = std::time::Instant::now().checked_add(spin_dwell);
+                    let mut ticks: u32 = 0;
+                    while receiver.is_empty() {
+                        ticks = ticks.wrapping_add(1);
+                        if ticks & 63 == 0
+                            && until.is_none_or(|until| std::time::Instant::now() >= until)
+                        {
+                            break;
+                        }
+                        std::hint::spin_loop();
+                    }
+                    if receiver.is_empty() {
+                        spin_dwell /= 2;
+                    } else {
+                        spin_dwell = SPIN_DWELL;
+                        fruitless = 0;
+                    }
+                }
 
-                written_uncommitted += 1;
-
-                // check if it's time to publish descriptors and kick the driver
-                if written_uncommitted >= BATCH_SIZE {
-                    commit_pending(&mut ring, &mut written_uncommitted);
-                    kick(&ring);
+                if timeouts < MAX_TIMEOUTS {
+                    timeouts += 1;
+                    let _ = park.ready_timeout(PARK_TIMEOUT);
+                } else {
+                    timeouts = 0;
                 }
             }
-            drop_item(item);
+
+            if last_report.elapsed() >= REPORT_INTERVAL {
+                if !stats.is_empty() {
+                    let publishes = stats
+                        .commit_full
+                        .saturating_add(stats.commit_idle)
+                        .saturating_add(stats.commit_ring)
+                        .saturating_add(stats.commit_residual);
+                    log::debug!(
+                        "xdp tx cpu {cpu_id}: sent {} dropped(no_route {} no_mac {} gre {}) \
+                         published {} times (batch_full {} idle {} ring_full {} residual {}), \
+                         ring_stalled_drops {}, {:.1} descriptors per publication",
+                        stats.tx,
+                        stats.drop_no_route,
+                        stats.drop_no_mac,
+                        stats.drop_gre,
+                        publishes,
+                        stats.commit_full,
+                        stats.commit_idle,
+                        stats.commit_ring,
+                        stats.commit_residual,
+                        stats.drop_ring_stalled,
+                        stats.committed as f64 / publishes.max(1) as f64,
+                    );
+                    stats = TxStats::default();
+                }
+                last_report = std::time::Instant::now();
+            }
         }
+        assert_eq!(batched_packets, 0);
         commit_pending(&mut ring, &mut written_uncommitted);
         kick(&ring);
 
@@ -641,12 +674,52 @@ impl<U: Umem> TxLoop<U> {
             );
 
             completion.sync(true);
-            while let Some(frame) = completion.read() {
-                umem.release_completed(frame);
+            while let Some(frame_offset) = completion.read() {
+                umem.release_completed(frame_offset);
             }
 
             ring.sync(false);
             kick(&ring);
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn wait_for_ring_slot<U: Umem>(
+    ring: &mut TxRing<U::Frame>,
+    completion: &mut TxCompletionRing,
+    umem: &U,
+) -> bool {
+    const RING_STALL_LIMIT: Duration = Duration::from_millis(5);
+    let mut deadline = None;
+    let mut pass: u32 = 0;
+    loop {
+        completion.sync(true);
+        // we haven't written any frames so we only need to sync the consumer position
+        ring.sync(false);
+
+        // check if any frames were completed
+        while let Some(frame_offset) = completion.read() {
+            umem.release_completed(frame_offset);
+        }
+
+        if ring.available() > 0 && umem.available() > 0 {
+            return true;
+        }
+
+        // queues are full, if NEEDS_WAKEUP is set kick the driver so hopefully it'll
+        // complete some work
+        kick(ring);
+
+        pass = pass.wrapping_add(1);
+        if pass.is_multiple_of(64) {
+            let now = std::time::Instant::now();
+            match deadline {
+                None => deadline = Some(now.checked_add(RING_STALL_LIMIT).unwrap_or(now)),
+                Some(deadline) if now >= deadline => return false,
+                Some(_) => {}
+            }
         }
     }
 }
@@ -687,61 +760,5 @@ fn kick_error(e: std::io::Error) {
         _ => {
             log::error!("network interface driver error: {e:?}");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::tx_loop::{Receiver, TryRecvError, TrySendError, channel};
-
-    #[test]
-    fn test_send_full() {
-        let (sender, _receiver) = channel(1);
-
-        assert!(sender.try_send(1).is_ok());
-        match sender.try_send(2) {
-            Err(TrySendError::Full(item)) => assert_eq!(item, 2),
-            result => panic!("expected full queue, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn test_send_disconnected() {
-        let (sender, receiver) = channel(1);
-        drop(receiver);
-
-        match sender.try_send(1) {
-            Err(TrySendError::Disconnected(item)) => assert_eq!(item, 1),
-            result => panic!("expected disconnected queue, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn test_recv_disconnected() {
-        let (sender, receiver) = channel(1);
-        sender
-            .try_send(1)
-            .expect("send item before dropping sender");
-        drop(sender);
-
-        assert_eq!(receiver.try_recv().expect("receive queued item"), 1);
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(TryRecvError::Disconnected)
-        ));
-    }
-
-    #[test]
-    fn test_recv_waits_for_cloned_sender() {
-        let (sender, receiver) = channel::<i32>(1);
-        let sender_clone = sender.clone();
-        drop(sender);
-
-        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
-        drop(sender_clone);
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(TryRecvError::Disconnected)
-        ));
     }
 }

@@ -4,6 +4,7 @@
 
 pub mod account_loader;
 pub mod account_overrides;
+pub(crate) mod artifact_pool;
 #[cfg(any(feature = "conformance", feature = "dev-context-only-utils"))]
 pub mod conformance;
 pub mod nonce_info;

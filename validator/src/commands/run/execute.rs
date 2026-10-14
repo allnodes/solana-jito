@@ -152,7 +152,8 @@ pub fn execute(
     } else {
         None
     };
-    let use_progress_bar = log_config.is_none();
+    let use_progress_bar =
+        log_config.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     agave_logger::initialize_logging(logfile);
 
     cli::warn_for_deprecated_arguments(matches);
@@ -178,11 +179,38 @@ pub fn execute(
             Err(format!("invalid entrypoint address: {addr}"))?;
         }
     }
+
+    #[cfg(target_os = "linux")]
+    allnodes_solana::exclude_isolated_cpus();
+
     // XDP is not needed for init — it only initializes the ledger and exits.
     // Also, init drops all Linux capabilities in main() so XDP setup would fail.
     #[cfg(target_os = "linux")]
     let xdp_transmit_config: Option<XdpConfig> =
         build_xdp_config(matches, &operation, &bind_addresses)?;
+
+    #[cfg(target_os = "linux")]
+    let xdp_chain_loading = matches.is_present("xdp_chain_loading");
+    #[cfg(target_os = "linux")]
+    let xdp_queue_base: Option<u32> = matches
+        .value_of("xdp_queue_base")
+        .map(|value| value.parse().expect("clap already accepted this queue number"));
+    #[cfg(target_os = "linux")]
+    let xdp_interface = matches
+        .value_of("xdp_interface")
+        .or_else(|| matches.value_of("experimental_retransmit_xdp_interface"));
+
+    #[cfg(target_os = "linux")]
+    let xdp_receive_mode = match xdp_transmit_config.as_ref() {
+        None => super::xdp_receive::ReceiveMode::Off { missing: Vec::new() },
+        Some(xdp_config) => super::xdp_receive::decide(
+            xdp_interface,
+            xdp_config.zero_copy,
+            xdp_chain_loading,
+            xdp_config.queues.len(),
+            &caps::read(None, caps::CapSet::Permitted).unwrap_or_default(),
+        ),
+    };
 
     let dynamic_port_range =
         solana_net_utils::parse_port_range(matches.value_of("dynamic_port_range").unwrap())
@@ -269,6 +297,13 @@ pub fn execute(
             "--num-votor-endpoints must be at most {MAX_ENDPOINTS}"
         ))?;
     }
+    #[cfg(target_os = "linux")]
+    let num_quic_endpoints = super::xdp_receive::quic_endpoints(
+        xdp_interface,
+        num_quic_endpoints,
+        matches.occurrences_of("num_quic_endpoints") > 0,
+        xdp_receive_mode.is_full(),
+    );
 
     let node_config = NodeConfig {
         advertised_ip,
@@ -288,6 +323,24 @@ pub fn execute(
 
     let exit = Arc::new(AtomicBool::new(false));
 
+    info!(
+        "Bound all network sockets as follows:\n{}",
+        allnodes_solana::format_sockets(&node.sockets)
+    );
+
+    // TODO: Once entrypoints are updated to return shred-version, this should
+    // abort if it fails to obtain a shred-version, so that nodes always join
+    // gossip with a valid shred-version. The code to adopt entrypoint shred
+    // version can then be deleted from gossip and get_rpc_node above.
+    let expected_shred_version = value_t!(matches, "expected_shred_version", u16)
+        .ok()
+        .or_else(|| get_cluster_shred_version(&entrypoint_addrs, bind_addresses.active()));
+
+    let identity_path = match matches.value_of("identity") {
+        None | Some("ASK") => None,
+        Some(path) => PathBuf::from_str(path).ok(),
+    };
+
     #[cfg(not(target_os = "linux"))]
     let _ = config;
 
@@ -304,7 +357,7 @@ pub fn execute(
 
         let super::Config { primordial_caps } = config;
 
-        let mut required_caps = HashSet::new();
+        let mut required = super::caps_check::CapRequirements::new();
         let mut retained_caps = HashSet::new();
         let mut supported_caps = HashSet::from_iter([
             CAP_BPF,
@@ -313,18 +366,29 @@ pub fn execute(
             CAP_PERFMON,
             CAP_SYS_NICE,
         ]);
+        supported_caps.insert(caps::Capability::CAP_SYS_ADMIN);
 
         // make sure we keep any primordial caps
         supported_caps.extend(primordial_caps.clone());
-        required_caps.extend(primordial_caps.clone());
+        for cap in primordial_caps.iter() {
+            required.require(*cap, "already held by the process before startup (running as root)");
+        }
         retained_caps.extend(primordial_caps.clone());
 
-        if let Some(xdp_config) = xdp_transmit_config.as_ref() {
-            required_caps.insert(CAP_NET_ADMIN);
-            required_caps.insert(CAP_NET_RAW);
-            if xdp_config.zero_copy {
-                required_caps.insert(CAP_BPF);
-                required_caps.insert(CAP_PERFMON);
+        if xdp_transmit_config.is_some() {
+            required.require(
+                CAP_NET_ADMIN,
+                "attach the XDP program, resize the NIC queues, and steer the TPU port to the \
+                 receive queue",
+            );
+            required.require(CAP_NET_RAW, "create and bind the AF_XDP sockets");
+            if xdp_receive_mode.installs_program() {
+                for (cap, reason) in
+                    super::xdp_receive::receive_capabilities(xdp_receive_mode.needs_chaining())
+                        .into_requirements()
+                {
+                    required.require(cap, reason);
+                }
             }
         }
 
@@ -332,10 +396,25 @@ pub fn execute(
             value_t_or_exit!(matches, "snapshot_packager_niceness_adj", i8);
 
         if snapshot_packager_niceness_adj != 0 || run_args.json_rpc_config.rpc_niceness_adj != 0 {
-            required_caps.insert(CAP_SYS_NICE);
+            required.require(CAP_SYS_NICE, "apply the configured niceness adjustments");
             retained_caps.insert(CAP_SYS_NICE);
         }
 
+        let remediation =
+            super::xdp_receive::with_receive_capabilities(&required, xdp_chain_loading);
+
+        match &xdp_receive_mode {
+            super::xdp_receive::ReceiveMode::Off { missing } if !missing.is_empty() => {
+                warn!("{}", remediation.explain_degraded(missing.as_slice()));
+            }
+            super::xdp_receive::ReceiveMode::Fatal(reason) => {
+                error!("{reason}");
+                std::process::exit(1);
+            }
+            _ => {}
+        }
+
+        let required_caps = required.as_set();
         // lazy dev check
         assert!(
             required_caps.is_subset(&supported_caps),
@@ -345,14 +424,9 @@ pub fn execute(
         // validate and minimize the permitted set
         let current_permitted =
             caps::read(None, CapSet::Permitted).expect("permitted capset to be readable");
-        let missing_caps = required_caps
-            .difference(&current_permitted)
-            .collect::<Vec<_>>();
+        let missing_caps = required.missing(&current_permitted);
         if !missing_caps.is_empty() {
-            error!(
-                "the current configuration requires the following capabilities, which have not \
-                 been permitted to the current process: {missing_caps:?}",
-            );
+            error!("{}", remediation.explain_missing(&missing_caps));
             std::process::exit(1);
         }
         // warn about extraneous caps that no configuration requires
@@ -366,10 +440,16 @@ pub fn execute(
             );
         }
 
+        let mut setup_caps = required_caps.clone();
+        if xdp_receive_mode.is_full() && current_permitted.contains(&caps::Capability::CAP_SYS_ADMIN)
+        {
+            setup_caps.insert(caps::Capability::CAP_SYS_ADMIN);
+        }
+
         // drop all caps that the current configuration does not require
-        caps::set(None, CapSet::Effective, &required_caps)
+        caps::set(None, CapSet::Effective, &setup_caps)
             .expect("linux allows effective capset to be set");
-        caps::set(None, CapSet::Permitted, &required_caps)
+        caps::set(None, CapSet::Permitted, &setup_caps)
             .expect("linux allows permitted capset to be set");
 
         // XDP _MUST_ be setup _BEFORE_ the app spawns any threads to ensure linux
@@ -402,6 +482,51 @@ pub fn execute(
                     ),
                     _ => panic!("IPv6 not supported"),
                 };
+                let reported_mode = match xdp_receive_mode {
+                    super::xdp_receive::ReceiveMode::Exclusive => {
+                        solana_core::system_monitor_service::XdpReceiveState::Exclusive
+                    }
+                    super::xdp_receive::ReceiveMode::Chained => {
+                        solana_core::system_monitor_service::XdpReceiveState::Chained
+                    }
+                    super::xdp_receive::ReceiveMode::Adopted(_) => {
+                        solana_core::system_monitor_service::XdpReceiveState::Adopted
+                    }
+                    super::xdp_receive::ReceiveMode::Off { .. }
+                    | super::xdp_receive::ReceiveMode::Fatal(_) => {
+                        solana_core::system_monitor_service::XdpReceiveState::Off
+                    }
+                };
+                let mut accelerated = Vec::new();
+                if xdp_receive_mode.is_full() {
+                    let receive = super::xdp_receive::configure(
+                        &xdp_interface,
+                        &node,
+                        xdp_receive_mode,
+                        zero_copy,
+                        xdp_chain_loading,
+                        xdp_config.queues.len(),
+                        xdp_queue_base,
+                        exit.clone(),
+                    );
+                    xdp_config.manage_program = false;
+                    xdp_config.tx_queue_base = u64::from(receive.tx_base);
+                    accelerated = receive.accelerated;
+                } else {
+                    super::xdp_receive::clear_leftover_steering(&xdp_interface, &node);
+                    xdp_config.tx_queue_base = u64::from(
+                        super::xdp_receive::transmit_queue_base(
+                            &xdp_interface,
+                            xdp_queue_base,
+                            xdp_config.queues.len(),
+                        )
+                        .unwrap_or_else(|err| {
+                            error!("{err}");
+                            std::process::exit(1);
+                        }),
+                    );
+                }
+
                 // Nothing can express per-module queue assignments yet, so every
                 // module transmits over the whole queue set.
                 let all_positions: Box<[usize]> = (0..xdp_config.queues.len()).collect();
@@ -420,6 +545,8 @@ pub fn execute(
                     XdpNetworkConfigReport {
                         zero_copy,
                         interface: xdp_interface,
+                        receive: reported_mode,
+                        accelerated,
                     },
                 )
             })
@@ -431,19 +558,27 @@ pub fn execute(
         caps::set(None, CapSet::Permitted, &retained_caps)
             .expect("linux allows permitted capset to be set");
 
+        super::caps_check::restore_core_dumps();
+
+        super::seccomp::install_lockdown();
+
         (xdp_transmit_setup, report)
     };
 
     #[cfg(not(target_os = "linux"))]
     let (xdp_transmit_setup, xdp_network_config_report) = (None, None);
 
-    #[cfg(target_os = "linux")]
-    let poh_pinned_cpu_core = value_of(matches, "poh_pinned_cpu_core")
-        .or_else(|| value_of(matches, "experimental_poh_pinned_cpu_core"))
-        .or(poh_service::DEFAULT_PINNED_CPU_CORE);
-
-    #[cfg(not(target_os = "linux"))]
-    let poh_pinned_cpu_core = None;
+    let mut poh_pinned_cpu_core = value_of(matches, "poh_pinned_cpu_core")
+        .or_else(|| value_of(matches, "experimental_poh_pinned_cpu_core"));
+    let mut poh_message = None;
+    solana_core::allnodes::init(
+        &run_args.ledger_path,
+        identity_path.as_ref(),
+        expected_shred_version,
+        advertised_ip,
+        &mut poh_pinned_cpu_core,
+        &mut poh_message,
+    );
 
     solana_core::validator::report_target_features();
 
@@ -476,7 +611,6 @@ pub fn execute(
     let do_port_check = !matches.is_present("no_port_check");
 
     let ledger_path = run_args.ledger_path;
-    let blockstore_cleanup_strategy = BlockstoreCleanupStrategy::from_clap_arg_match(matches)?;
 
     let debug_keys: Option<Arc<HashSet<_>>> = if matches.is_present("debug_key") {
         Some(Arc::new(
@@ -573,13 +707,6 @@ pub fn execute(
     } else {
         AccountShrinkThreshold::IndividualStore { shrink_ratio }
     };
-    // TODO: Once entrypoints are updated to return shred-version, this should
-    // abort if it fails to obtain a shred-version, so that nodes always join
-    // gossip with a valid shred-version. The code to adopt entrypoint shred
-    // version can then be deleted from gossip and get_rpc_node above.
-    let expected_shred_version = value_t!(matches, "expected_shred_version", u16)
-        .ok()
-        .or_else(|| get_cluster_shred_version(&entrypoint_addrs, bind_addresses.active()));
 
     let tower_path = value_t!(matches, "tower", PathBuf)
         .ok()
@@ -851,6 +978,21 @@ pub fn execute(
     ));
 
     let mut validator_config = ValidatorConfig {
+        // Allnodes config
+        identity_path,
+        use_mostly_confirmed_threshold: !matches.is_present("disable_mostly_confirmed_threshold"),
+        mostly_confirmed_threshold_config_path: value_t!(
+            matches,
+            "mostly_confirmed_threshold_config",
+            PathBuf
+        )
+        .ok(),
+        voting_patch_flags: None,
+        voting_patch_flags2: solana_core::allnodes::init_flags2(
+            matches.is_present("experimental_feature"),
+        ),
+        poh_message,
+
         log_config,
         require_tower: matches.is_present("require_tower"),
         require_vote_history: !matches.is_present("do_not_require_vote_history"),
@@ -893,7 +1035,7 @@ pub fn execute(
         votor_peer_overrides,
         repair_handler_type: RepairHandlerType::default(),
         gossip_validators,
-        blockstore_cleanup_strategy,
+        blockstore_cleanup_strategy: BlockstoreCleanupStrategy::None,
         blockstore_options: run_args.blockstore_options,
         run_verification: !matches.is_present("skip_startup_ledger_verification"),
         debug_keys,
@@ -1039,6 +1181,7 @@ pub fn execute(
     admin_rpc_service::run(
         &ledger_path,
         admin_rpc_service::AdminRpcRequestMetadata {
+            flags2: validator_config.voting_patch_flags2.clone(),
             rpc_addr: validator_config.rpc_addrs.map(|(rpc_addr, _)| rpc_addr),
             start_time: std::time::SystemTime::now(),
             validator_exit: validator_config.validator_exit.clone(),
@@ -1146,6 +1289,8 @@ pub fn execute(
         );
         *start_progress.write().unwrap() = ValidatorStartProgress::Initializing;
     }
+
+    validator_config.blockstore_cleanup_strategy = BlockstoreCleanupStrategy::from_clap_arg_match(matches)?;
 
     if operation == Operation::Initialize {
         info!("Validator ledger initialization complete");
@@ -1318,8 +1463,32 @@ fn new_snapshot_config(
     account_paths: &[PathBuf],
     incremental_snapshot_fetch: bool,
 ) -> Result<SnapshotConfig, Box<dyn std::error::Error>> {
+    let mut no_snapshots = if matches.occurrences_of("no_snapshots") == 0 {
+        None
+    } else {
+        matches
+            .value_of("no_snapshots")
+            .map(|value| value == "true")
+    };
+    if matches.occurrences_of("snapshot_interval_slots") > 0
+        || matches.occurrences_of("full_snapshot_interval_slots") > 0
+    {
+        match no_snapshots {
+            Some(true) => {
+                return Err(Box::new(clap::Error::with_description(
+                    "The --no-snapshots argument is not compatible with --snapshot-interval-slots \
+                     or --full-snapshot-interval-slots",
+                    clap::ErrorKind::ArgumentConflict,
+                )));
+            }
+            None | Some(false) => {
+                no_snapshots = Some(false);
+            }
+        }
+    }
+
     let (full_snapshot_archive_interval, incremental_snapshot_archive_interval) =
-        if matches.is_present("no_snapshots") {
+        if no_snapshots.unwrap_or(true) {
             // snapshots are disabled
             (SnapshotInterval::Disabled, SnapshotInterval::Disabled)
         } else {
@@ -1561,6 +1730,14 @@ fn build_xdp_config(
             }
         }
     };
+    let cpus = cpus.map(|cpus| {
+        super::xdp_receive::transmit_cores(
+            cpus,
+            xdp_interface,
+            xdp_cpu_cores.is_some(),
+            poh_pinned_cpu_core,
+        )
+    });
     Ok(cpus.map(|cpus| {
         info!("XDP enabled on CPU cores: {cpus:?}");
         // Map the CPU list onto hardware queues sequentially (queue i -> cpus[i]).

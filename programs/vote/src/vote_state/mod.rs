@@ -612,11 +612,12 @@ pub fn process_vote_unfiltered(
     slot_hashes: &[SlotHash],
     epoch: Epoch,
     current_slot: Slot,
+    pop_expired: bool,
 ) -> Result<(), VoteError> {
     check_slots_are_valid(vote_state, vote_slots, &vote.hash, slot_hashes)?;
     vote_slots
         .iter()
-        .for_each(|s| vote_state.process_next_vote_slot(*s, epoch, current_slot));
+        .for_each(|s| vote_state.process_next_vote_slot(*s, epoch, current_slot, pop_expired));
     Ok(())
 }
 
@@ -626,6 +627,7 @@ pub fn process_vote(
     slot_hashes: &[SlotHash],
     epoch: Epoch,
     current_slot: Slot,
+    pop_expired: bool,
 ) -> Result<(), VoteError> {
     if vote.slots.is_empty() {
         return Err(VoteError::EmptySlots);
@@ -647,6 +649,7 @@ pub fn process_vote(
         slot_hashes,
         epoch,
         current_slot,
+        pop_expired,
     )
 }
 
@@ -654,6 +657,7 @@ pub fn process_vote(
 pub fn process_vote_unchecked(
     vote_state: &mut VoteStateHandler,
     vote: Vote,
+    pop_expired: bool,
 ) -> Result<(), VoteError> {
     if vote.slots.is_empty() {
         return Err(VoteError::EmptySlots);
@@ -666,6 +670,7 @@ pub fn process_vote_unchecked(
         &slot_hashes,
         vote_state.current_epoch(),
         0,
+        pop_expired,
     )
 }
 
@@ -677,7 +682,7 @@ pub fn process_slot_votes_unchecked(vote_state: &mut VoteStateHandler, slots: &[
 }
 
 pub fn process_slot_vote_unchecked(vote_state: &mut VoteStateHandler, slot: Slot) {
-    let _ = process_vote_unchecked(vote_state, Vote::new(vec![slot], Hash::default()));
+    let _ = process_vote_unchecked(vote_state, Vote::new(vec![slot], Hash::default()), true);
 }
 
 /// Authorize the given pubkey to withdraw or sign votes. This may be called multiple times,
@@ -1221,7 +1226,14 @@ pub fn process_vote_with_account<S: std::hash::BuildHasher>(
     let authorized_voter = vote_state.get_and_update_authorized_voter(clock.epoch)?;
     verify_authorized_signer(&authorized_voter, signers)?;
 
-    process_vote(&mut vote_state, vote, slot_hashes, clock.epoch, clock.slot)?;
+    process_vote(
+        &mut vote_state,
+        vote,
+        slot_hashes,
+        clock.epoch,
+        clock.slot,
+        true,
+    )?;
     if let Some(timestamp) = vote.timestamp {
         vote.slots
             .iter()
