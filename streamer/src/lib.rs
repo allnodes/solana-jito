@@ -9,6 +9,15 @@ pub mod quic_socket;
 pub mod recvmmsg;
 pub mod sendmmsg;
 pub mod streamer;
+#[cfg(target_os = "linux")]
+pub mod xdp_quic;
+#[cfg(target_os = "linux")]
+pub mod xdp_udp;
+#[cfg(not(target_os = "linux"))]
+pub mod xdp_quic {
+    #[derive(Debug)]
+    pub enum XskQuicSocket {}
+}
 
 #[macro_use]
 extern crate log;

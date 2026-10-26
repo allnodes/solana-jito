@@ -55,6 +55,17 @@ pub fn main() {
                 .expect("linux allows effective capset to be set");
 
             primordial_caps
+        } else if subcommand == commands::reset_xdp_interface::COMMAND {
+            let keep = CapsHashSet::from([caps::Capability::CAP_NET_ADMIN]);
+            let permitted = caps::read(None, CapSet::Permitted)
+                .expect("linux allows permitted capset to be read");
+            let keep = CapsHashSet::from_iter(keep.intersection(&permitted).copied());
+            caps::set(None, CapSet::Effective, &keep)
+                .expect("linux allows effective capset to be set");
+            caps::set(None, CapSet::Permitted, &keep)
+                .expect("linux allows permitted capset to be set");
+
+            CapsHashSet::new()
         } else {
             caps::clear(None, CapSet::Effective)
                 .expect("linux allows effective capset to be cleared");
@@ -89,11 +100,20 @@ pub fn main() {
         )
         .inspect_err(|err| error!("Failed to start validator: {err}"))
         .map_err(commands::Error::Dynamic),
+        ("enable-experimental-feature", _) => {
+            commands::allnodes::enable_experimental_feature_execute(&ledger_path, true)
+        }
+        ("disable-experimental-feature", _) => {
+            commands::allnodes::enable_experimental_feature_execute(&ledger_path, false)
+        }
         ("authorized-voter", Some(authorized_voter_subcommand_matches)) => {
             commands::authorized_voter::execute(authorized_voter_subcommand_matches, &ledger_path)
         }
         ("plugin", Some(plugin_subcommand_matches)) => {
             commands::plugin::execute(plugin_subcommand_matches, &ledger_path)
+        }
+        (commands::reset_xdp_interface::COMMAND, Some(subcommand_matches)) => {
+            commands::reset_xdp_interface::execute(subcommand_matches)
         }
         ("contact-info", Some(subcommand_matches)) => {
             commands::contact_info::execute(subcommand_matches, &ledger_path)
