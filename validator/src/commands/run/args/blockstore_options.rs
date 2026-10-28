@@ -160,7 +160,7 @@ impl FromClapArgMatches for BlockstoreCleanupStrategy {
             let limit = match matches.value_of("limit_blockstore_size") {
                 Some(_) => {
                     let limit = value_t!(matches, "limit_blockstore_size", u64)?;
-                    if limit < DEFAULT_MIN_MAX_BLOCKSTORE_SHREDS {
+                    if limit < *DEFAULT_MIN_MAX_BLOCKSTORE_SHREDS {
                         return Err(crate::commands::Error::Dynamic(
                             Box::<dyn std::error::Error>::from(format!(
                                 "The provided --limit-blockstore-size value is too small, the \
@@ -170,14 +170,14 @@ impl FromClapArgMatches for BlockstoreCleanupStrategy {
                     }
                     limit
                 }
-                None => DEFAULT_MAX_BLOCKSTORE_SHREDS,
+                None => *DEFAULT_MAX_BLOCKSTORE_SHREDS,
             };
             Ok(BlockstoreCleanupStrategy::CountDataAndCodingShreds(limit))
         } else if matches.is_present("limit_ledger_size") {
             let limit = match matches.value_of("limit_ledger_size") {
                 Some(_) => {
                     let limit = value_t!(matches, "limit_ledger_size", u64)?;
-                    if limit < LEGACY_DEFAULT_MIN_MAX_LEDGER_SHREDS {
+                    if limit < *LEGACY_DEFAULT_MIN_MAX_LEDGER_SHREDS {
                         return Err(crate::commands::Error::Dynamic(
                             Box::<dyn std::error::Error>::from(format!(
                                 "The provided --limit-ledger-size value is too small, the minimum \
@@ -187,7 +187,7 @@ impl FromClapArgMatches for BlockstoreCleanupStrategy {
                     }
                     limit
                 }
-                None => LEGACY_DEFAULT_MAX_LEDGER_SHREDS,
+                None => *LEGACY_DEFAULT_MAX_LEDGER_SHREDS,
             };
             Ok(BlockstoreCleanupStrategy::CountDataShreds(limit))
         } else {

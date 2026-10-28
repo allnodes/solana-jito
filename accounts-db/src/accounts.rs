@@ -408,9 +408,10 @@ impl Accounts {
         index_key: &IndexKey,
         filter: F,
         byte_limit_for_scan: Option<usize>,
+        abort: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> ScanResult<Vec<KeyedAccountSharedData>> {
         let sum = AtomicUsize::default();
-        let config = ScanConfig::default().recreate_with_abort();
+        let config = ScanConfig { abort }.recreate_with_abort();
         let mut collector = Vec::new();
         let result = self
             .accounts_db

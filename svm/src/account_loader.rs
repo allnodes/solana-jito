@@ -223,6 +223,10 @@ impl<'a, CB: TransactionProcessingCallback> AccountLoader<'a, CB> {
         }
     }
 
+    pub(crate) fn inner_callbacks(&self) -> &'a CB {
+        self.callbacks
+    }
+
     // Load an account either from our own store or accounts-db and inspect it on behalf of Bank.
     // Inspection is required prior to any modifications to the account. This function is used
     // by load_transaction() and validate_transaction_fee_payer() for that purpose. It returns
