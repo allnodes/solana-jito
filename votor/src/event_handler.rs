@@ -906,6 +906,7 @@ impl EventHandler {
         }
         if !refreshed_votes.is_empty() {
             votes.push(BLSOp::RefreshVotes {
+                identity: voting_context.identity_keypair.pubkey(),
                 votes: refreshed_votes,
             });
         }
@@ -1474,7 +1475,7 @@ mod tests {
                         found |= !keep;
                         keep
                     }
-                    BLSOp::RefreshVotes { votes } => {
+                    BLSOp::RefreshVotes { votes, .. } => {
                         let previous_len = votes.len();
                         votes.retain(|vote| vote.as_ref() != &expected_message);
                         found |= votes.len() != previous_len;
@@ -1510,7 +1511,7 @@ mod tests {
                     found |= !keep;
                     keep
                 }
-                BLSOp::RefreshVotes { votes } => {
+                BLSOp::RefreshVotes { votes, .. } => {
                     let previous_len = votes.len();
                     votes.retain(|vote| vote.as_ref() != &expected_message);
                     found |= votes.len() != previous_len;

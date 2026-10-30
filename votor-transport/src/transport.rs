@@ -52,6 +52,7 @@ pub(crate) fn new_transport_config(max_datagrams_per_second_per_peer: usize) -> 
         // Datagrams only - disable streams entirely.
         .max_concurrent_bidi_streams(VarInt::from(0u8))
         .max_concurrent_uni_streams(VarInt::from(0u8));
+    cfg.congestion_controller_factory(Arc::new(crate::ingress_budget::GuardBudgetFactory));
     cfg
 }
 

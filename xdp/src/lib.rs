@@ -1,6 +1,28 @@
 #![cfg(feature = "agave-unstable-api")]
 
 #[cfg(target_os = "linux")]
+pub mod bond;
+#[cfg(target_os = "linux")]
+pub mod bpf_sys;
+#[cfg(target_os = "linux")]
+pub mod dispatcher;
+#[cfg(target_os = "linux")]
+pub mod ethtool;
+#[cfg(target_os = "linux")]
+pub mod plan;
+#[cfg(target_os = "linux")]
+pub mod queue_alloc;
+#[cfg(target_os = "linux")]
+pub mod runtime;
+#[cfg(target_os = "linux")]
+pub mod rx;
+#[cfg(target_os = "linux")]
+pub mod rx_tx;
+
+#[cfg(target_os = "linux")]
+pub use program::{add_rx_port, load_rx_program, register_xsk};
+
+#[cfg(target_os = "linux")]
 pub mod device;
 #[cfg(target_os = "linux")]
 pub mod gre;

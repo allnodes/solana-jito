@@ -1807,6 +1807,8 @@ impl Bank {
             .write()
             .unwrap()
             .prune_by_deployment_slot(deployment_slot);
+        self.transaction_processor
+            .prune_artifact_pool_by_deployment_slot(deployment_slot);
     }
 
     /// Epoch in which the new cooldown warmup rate for stake was activated
@@ -5466,12 +5468,23 @@ impl Bank {
         filter: F,
         byte_limit_for_scan: Option<usize>,
     ) -> ScanResult<Vec<KeyedAccountSharedData>> {
+        self.get_filtered_indexed_accounts_with_abort(index_key, filter, byte_limit_for_scan, None)
+    }
+
+    pub fn get_filtered_indexed_accounts_with_abort<F: Fn(&AccountSharedData) -> bool>(
+        &self,
+        index_key: &IndexKey,
+        filter: F,
+        byte_limit_for_scan: Option<usize>,
+        abort: Option<Arc<AtomicBool>>,
+    ) -> ScanResult<Vec<KeyedAccountSharedData>> {
         self.rc.accounts.load_by_index_key_with_filter(
             &self.ancestors,
             self.bank_id,
             index_key,
             filter,
             byte_limit_for_scan,
+            abort,
         )
     }
 
