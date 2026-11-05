@@ -175,7 +175,7 @@ pub(super) fn simulate_bundle(
         &transactions,
         &pre_execution_accounts,
         &post_execution_accounts,
-        Some(1_000),
+        None,
     );
 
     let accounts_data_len: usize = results

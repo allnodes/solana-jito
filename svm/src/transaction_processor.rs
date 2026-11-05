@@ -212,6 +212,8 @@ pub struct TransactionBatchProcessor<FG: ForkGraph> {
     /// Programs required for transaction batch processing
     pub global_program_cache: Arc<RwLock<ProgramCache<FG>>>,
 
+    pub(crate) artifact_pool: Arc<crate::artifact_pool::ArtifactPool>,
+
     /// ProgramRuntimeEnvironment of the current epoch
     pub program_runtime_environment: ProgramRuntimeEnvironment,
 
@@ -258,6 +260,7 @@ impl<FG: ForkGraph> Default for TransactionBatchProcessor<FG> {
             sysvar_cache: RwLock::<SysvarCache>::default(),
             epoch_boundary_preparation: Arc::new(RwLock::new(EpochBoundaryPreparation::default())),
             global_program_cache: Arc::new(RwLock::new(ProgramCache::new(Slot::default()))),
+            artifact_pool: Arc::default(),
             program_runtime_environment: ProgramRuntimeEnvironment::from(
                 BuiltinProgram::new_loader(VmConfig::default()),
             ),
@@ -391,6 +394,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             sysvar_cache: RwLock::<SysvarCache>::default(),
             epoch_boundary_preparation: self.epoch_boundary_preparation.clone(),
             global_program_cache: self.global_program_cache.clone(),
+            artifact_pool: self.artifact_pool.clone(),
             program_runtime_environment: environments,
             deployment_env_override: None,
             builtin_program_ids: RwLock::new(builtin_program_ids),
@@ -1169,10 +1173,10 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             if program_cache_for_tx_batch.find(&key).is_some() {
                 continue;
             }
-            if let Some(loaded_program) = load_program_with_pubkey(
+            if let Some(loaded_program) = self.artifact_pool.load(
                 account_loader,
                 program_runtime_environments_for_execution,
-                &key,
+                &program,
                 self.slot,
                 execute_timings,
             ) {

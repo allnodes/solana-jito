@@ -46,6 +46,7 @@ impl QuicSocket {
             socket,
             fallback_src_ip,
             xdp_sender,
+            xsk: None,
         })
     }
 
@@ -73,9 +74,14 @@ impl QuicSocket {
                 socket,
                 fallback_src_ip,
                 xdp_sender,
+                xsk,
             }) => {
-                let socket = Arc::new(QuicXdpTxSocket::new(socket, fallback_src_ip, xdp_sender)?)
-                    as Arc<dyn AsyncUdpSocket>;
+                let socket = Arc::new(QuicXdpTxSocket::new(
+                    socket,
+                    fallback_src_ip,
+                    xdp_sender,
+                    xsk,
+                )?) as Arc<dyn AsyncUdpSocket>;
                 Endpoint::new_with_abstract_socket(
                     EndpointConfig::default(),
                     config,
@@ -118,6 +124,7 @@ pub struct QuicXdpSocketParts {
     pub socket: std::net::UdpSocket,
     pub fallback_src_ip: Ipv4Addr,
     pub xdp_sender: XdpSender,
+    pub xsk: Option<Box<crate::xdp_quic::XskQuicSocket>>,
 }
 
 impl Debug for QuicXdpSocketParts {
@@ -135,6 +142,7 @@ impl Debug for QuicXdpSocketParts {
 /// IPs), it falls back to a kernel `UdpSocket`.
 pub(crate) struct QuicXdpTxSocket {
     udp_socket: Arc<dyn AsyncUdpSocket>,
+    xsk_rx: Option<Arc<dyn AsyncUdpSocket>>,
     xdp_sender: QuicXdpSender,
     local_ips: Vec<Ipv4Addr>,
 }
@@ -144,6 +152,7 @@ impl QuicXdpTxSocket {
         socket: std::net::UdpSocket,
         fallback_src_ip: Ipv4Addr,
         xdp_sender: XdpSender,
+        xsk: Option<Box<crate::xdp_quic::XskQuicSocket>>,
     ) -> io::Result<Self> {
         let src_addr = socket.local_addr()?;
         let SocketAddr::V4(src_addr) = src_addr else {
@@ -164,8 +173,21 @@ impl QuicXdpTxSocket {
         // egress is expected to be rare: only RPC sendTransaction traffic or local testing.
         let local_ips = collect_local_ipv4_ips()?;
 
+        let udp_socket = TokioRuntime.wrap_udp_socket(socket)?;
+        #[cfg(target_os = "linux")]
+        let xsk_rx: Option<Arc<dyn AsyncUdpSocket>> = match xsk {
+            Some(xsk) => Some(xsk.into_async()?),
+            None => None,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let xsk_rx = {
+            let _ = xsk;
+            None
+        };
+
         Ok(Self {
-            udp_socket: TokioRuntime.wrap_udp_socket(socket)?,
+            udp_socket,
+            xsk_rx,
             xdp_sender: QuicXdpSender::new(xdp_sender, src_addr),
             local_ips,
         })
@@ -253,6 +275,15 @@ impl AsyncUdpSocket for QuicXdpTxSocket {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
+        let Some(xsk) = self.xsk_rx.as_ref() else {
+            return self.udp_socket.poll_recv(cx, bufs, meta);
+        };
+        if let Poll::Ready(result) = xsk.poll_recv(cx, bufs, meta) {
+            let received = result?;
+            if received > 0 {
+                return Poll::Ready(Ok(received));
+            }
+        }
         self.udp_socket.poll_recv(cx, bufs, meta)
     }
 
@@ -266,7 +297,12 @@ impl AsyncUdpSocket for QuicXdpTxSocket {
     }
 
     fn max_receive_segments(&self) -> usize {
-        self.udp_socket.max_receive_segments()
+        match self.xsk_rx.as_ref() {
+            Some(xsk) => xsk
+                .max_receive_segments()
+                .max(self.udp_socket.max_receive_segments()),
+            None => self.udp_socket.max_receive_segments(),
+        }
     }
 
     fn may_fragment(&self) -> bool {
@@ -364,3 +400,4 @@ fn destination_ip_key(destination: &SocketAddr) -> u32 {
         SocketAddr::V6(_) => unreachable!("IPv6 destinations are rejected before AF_XDP send"),
     }
 }
+

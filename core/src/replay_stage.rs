@@ -132,7 +132,9 @@ pub const SUPERMINORITY_THRESHOLD: f64 = 1f64 / 3f64;
 pub const MAX_UNCONFIRMED_SLOTS: usize = 5;
 pub const DUPLICATE_LIVENESS_THRESHOLD: f64 = 0.1;
 pub const DUPLICATE_THRESHOLD: f64 = 1.0 - SWITCH_FORK_THRESHOLD - DUPLICATE_LIVENESS_THRESHOLD;
+allnodes_client::constants! {
 const ASYNC_VERIFICATION_FREELIST_CAPACITY: usize = 5;
+}
 
 pub(crate) const MAX_VOTE_SIGNATURES: usize = 200;
 const MAX_VOTE_REFRESH_INTERVAL_MILLIS: usize = 5000;
@@ -1825,6 +1827,7 @@ impl ReplayStage {
                 // Unlikely that these channels are backed up, but even so we have refresh logic on the genesis vote
                 let _ = own_vote_sender.try_send(vote_msg.clone());
                 let _ = bls_sender.try_send(BLSOp::PushVote {
+                    identity: identity_keypair.pubkey(),
                     vote: Arc::new(vote_msg),
                 });
             }
@@ -2649,7 +2652,7 @@ impl ReplayStage {
         async_verification: Option<AsyncVerificationProgress>,
     ) {
         if let Some(async_verification) = async_verification
-            && async_verification_freelist.len() < ASYNC_VERIFICATION_FREELIST_CAPACITY
+            && async_verification_freelist.len() < *ASYNC_VERIFICATION_FREELIST_CAPACITY
         {
             async_verification_freelist.push(async_verification);
         }

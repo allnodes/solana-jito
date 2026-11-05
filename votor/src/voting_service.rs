@@ -67,10 +67,27 @@ const STANDSTILL_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub enum BLSOp {
-    PushVote { vote: Arc<VoteMessage> },
+    PushVote {
+        vote: Arc<VoteMessage>,
+        identity: solana_pubkey::Pubkey,
+    },
     PushCertificates { certificates: Vec<Arc<Certificate>> },
-    RefreshVotes { votes: Vec<Arc<VoteMessage>> },
+    RefreshVotes {
+        votes: Vec<Arc<VoteMessage>>,
+        identity: solana_pubkey::Pubkey,
+    },
     RefreshCertificates { certificates: Vec<Arc<Certificate>> },
+}
+
+impl BLSOp {
+    fn signing_identity(&self) -> Option<solana_pubkey::Pubkey> {
+        match self {
+            Self::PushVote { identity, .. } | Self::RefreshVotes { identity, .. } => {
+                Some(*identity)
+            }
+            Self::PushCertificates { .. } | Self::RefreshCertificates { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -202,6 +219,7 @@ pub struct VotingService {
 impl VotingService {
     pub fn new(
         bls_receiver: Receiver<BLSOp>,
+        frame_filter: Option<crate::frame_filter::FrameFilter>,
         cluster_info: Arc<ClusterInfo>,
         egress: mpsc::Sender<Bytes>,
         highest_finalized: Arc<RwLock<Option<ValidatedBlockFinalizationCert>>>,
@@ -211,7 +229,13 @@ impl VotingService {
             .name("solVotorVoteSvc".to_string())
             .spawn(move || {
                 info!("AlpenglowVotingService has started");
+                let mut queued_under = cluster_info.id();
                 loop {
+                    let current_identity = cluster_info.id();
+                    if queued_under != current_identity {
+                        standstill_queue = StandstillRefreshQueue::default();
+                        queued_under = current_identity;
+                    }
                     Self::maybe_handle_standstill_queue(
                         &mut standstill_queue,
                         highest_finalized.as_ref(),
@@ -224,7 +248,19 @@ impl VotingService {
                         Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => continue,
                     };
-                    Self::handle_bls_op(&cluster_info, bls_op, &egress, &mut standstill_queue);
+                    if bls_op
+                        .signing_identity()
+                        .is_some_and(|identity| identity != cluster_info.id())
+                    {
+                        continue;
+                    }
+                    Self::handle_bls_op(
+                        &cluster_info,
+                        bls_op,
+                        &egress,
+                        &mut standstill_queue,
+                        frame_filter.as_ref(),
+                    );
                 }
                 info!("AlpenglowVotingService has stopped");
             })
@@ -285,25 +321,27 @@ impl VotingService {
     fn broadcast_consensus_message(
         message: &VersionedWireConsensusMessage,
         egress: &mpsc::Sender<Bytes>,
-    ) {
+    ) -> bool {
         let buf = match wincode::serialize(message) {
             Ok(buf) => Bytes::from(buf),
             Err(err) => {
                 error!("Failed to serialize alpenglow message: {err:?}");
-                return;
+                return false;
             }
         };
 
         // Drop on full / closed channel: votor consensus tolerates loss, we
         // never want to backpressure into consensus, but will shout loudly.
         match egress.try_send(buf) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 error!("alpenglow transport egress channel full; dropping votes/certs!");
+                false
             }
             Err(TrySendError::Closed(_)) => {
                 // this is intentional - we can tear down the transport before votor.
                 warn!("alpenglow egress channel closed; must be shutting down");
+                false
             }
         }
     }
@@ -313,14 +351,19 @@ impl VotingService {
         bls_op: BLSOp,
         egress: &mpsc::Sender<Bytes>,
         standstill_queue: &mut StandstillRefreshQueue,
+        frame_filter: Option<&crate::frame_filter::FrameFilter>,
     ) {
         match bls_op {
-            BLSOp::PushVote { vote } => {
+            BLSOp::PushVote { vote, identity } => {
+                let kind = vote.vote;
                 let msg = VersionedWireConsensusMessage::new_from_vote(
                     Arc::unwrap_or_clone(vote),
                     cluster_info.my_shred_version(),
                 );
-                Self::broadcast_consensus_message(&msg, egress);
+                let resident = Self::broadcast_consensus_message(&msg, egress);
+                if let Some(filter) = frame_filter {
+                    filter.stage(&kind, &msg, &identity, resident);
+                }
             }
             BLSOp::PushCertificates { certificates } => {
                 for certificate in certificates {
@@ -331,7 +374,7 @@ impl VotingService {
                     Self::broadcast_consensus_message(&msg, egress);
                 }
             }
-            BLSOp::RefreshVotes { votes } => {
+            BLSOp::RefreshVotes { votes, .. } => {
                 for vote in votes {
                     let msg = VersionedWireConsensusMessage::new_from_vote(
                         Arc::unwrap_or_clone(vote),
@@ -447,6 +490,9 @@ mod tests {
             my_shred_version,
         )
     }
+
+
+
 
     #[test]
     fn test_rate_limit_pps_for_slot_duration() {
@@ -627,6 +673,7 @@ mod tests {
         (
             VotingService::new(
                 bls_receiver,
+                None,
                 cluster_info.clone(),
                 egress,
                 Arc::new(RwLock::new(None)),
@@ -637,7 +684,7 @@ mod tests {
         )
     }
 
-    #[test_case(BLSOp::PushVote { vote: Arc::new(test_vote(Vote::new_skip_vote(5), 1, 0)) }, None)]
+    #[test_case(BLSOp::PushVote { identity: solana_pubkey::Pubkey::default(), vote: Arc::new(test_vote(Vote::new_skip_vote(5), 1, 0)) }, None)]
     #[test_case(BLSOp::PushCertificates {
         certificates: vec![Arc::new(Certificate {
         cert_type: CertificateType::Skip(5),
@@ -650,14 +697,15 @@ mod tests {
         bitmap: Vec::new(),
     })))]
     #[test_case(BLSOp::RefreshVotes {
+        identity: solana_pubkey::Pubkey::default(),
         votes: vec![Arc::new(test_vote(Vote::new_skip_vote(6), 1, 0))],
     }, None)]
     fn test_send_message(bls_op: BLSOp, expected_message: Option<ConsensusMessage>) {
         agave_logger::setup();
 
         let expected_message = expected_message.unwrap_or_else(|| match &bls_op {
-            BLSOp::PushVote { vote } => ConsensusMessage::Vote((**vote).clone()),
-            BLSOp::RefreshVotes { votes } => ConsensusMessage::Vote((*votes[0]).clone()),
+            BLSOp::PushVote { vote, .. } => ConsensusMessage::Vote((**vote).clone()),
+            BLSOp::RefreshVotes { votes, .. } => ConsensusMessage::Vote((*votes[0]).clone()),
             _ => panic!("expected message is required for certificate operations"),
         });
 
@@ -708,6 +756,13 @@ mod tests {
             );
         }
 
+        let mut bls_op = bls_op;
+        match &mut bls_op {
+            BLSOp::PushVote { identity, .. } | BLSOp::RefreshVotes { identity, .. } => {
+                *identity = cluster_info.id()
+            }
+            _ => (),
+        }
         bls_sender.send(bls_op).expect("bls_sender.send");
 
         // The listener endpoint should receive the serialized VersionedWireConsensusMessage.

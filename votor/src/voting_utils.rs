@@ -304,6 +304,7 @@ pub(crate) fn insert_vote_and_create_bls_message(
 
     // Return vote for sending
     Ok(Some(BLSOp::PushVote {
+        identity: context.identity_keypair.pubkey(),
         vote: Arc::new(vote_msg),
     }))
 }
@@ -502,7 +503,7 @@ mod tests {
             &my_bls_keypair,
             &voting_context.sharable_banks.root(),
         );
-        if let BLSOp::PushVote { vote } = result {
+        if let BLSOp::PushVote { vote, .. } = result {
             let msg = Arc::unwrap_or_clone(vote);
             assert_eq!(msg, expected_message);
         } else {

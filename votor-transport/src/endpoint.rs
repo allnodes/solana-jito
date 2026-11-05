@@ -51,6 +51,7 @@ pub struct QuicDatagramEndpoint {
     /// Identity rotation sender kept here so we control when the channel closes.
     key_updater: Arc<KeyUpdateNotifier>,
     ban_sender: BanSender,
+    frame_cache: crate::frame_cache::FrameCache,
     /// Inbound stats, exposed so integration tests can assert on them.
     #[cfg(any(test, feature = "dev-context-only-utils"))]
     pub server_stats: Arc<ServerStats>,
@@ -84,6 +85,35 @@ impl QuicDatagramEndpoint {
         max_datagrams_per_second_per_peer: usize,
         cancel: CancellationToken,
     ) -> Result<(mpsc::Sender<Bytes>, Self), Error> {
+        Self::spawn_with_epoch(
+            runtime,
+            keypair,
+            inbound_sockets,
+            outbound_socket,
+            inbound_datagrams,
+            (peer_list, crate::epoch_word::closed(), None),
+            socket_addr_space,
+            max_datagrams_per_second_per_peer,
+            cancel,
+        )
+    }
+
+    pub fn spawn_with_epoch(
+        runtime: &Handle,
+        keypair: &Keypair,
+        inbound_sockets: Vec<QuicSocket>,
+        outbound_socket: QuicSocket,
+        inbound_datagrams: Sender<Datagram>,
+        peer_list: (
+            PeerListReceiver,
+            crate::epoch_word::EpochSource,
+            Option<crate::SpareReceiver>,
+        ),
+        socket_addr_space: SocketAddrSpace,
+        max_datagrams_per_second_per_peer: usize,
+        cancel: CancellationToken,
+    ) -> Result<(mpsc::Sender<Bytes>, Self), Error> {
+        let (peer_list, epoch_word, spares) = peer_list;
         assert!(!inbound_sockets.is_empty(), "Must have sockets provided");
         assert!(
             inbound_sockets.len() <= MAX_ENDPOINTS,
@@ -142,6 +172,12 @@ impl QuicDatagramEndpoint {
             cancel.clone(),
             max_datagrams_per_second_per_peer,
         );
+        let outbound = outbound.with_epoch(epoch_word);
+        let outbound = match spares {
+            Some(spares) => outbound.with_spares(spares),
+            None => outbound,
+        };
+        let frame_cache = outbound.frame_cache();
         task_handles.spawn_on(outbound.run(), runtime);
 
         // Inbound event channel allows the accept loops to forward authenticated
@@ -199,6 +235,7 @@ impl QuicDatagramEndpoint {
             task_handles,
             key_updater,
             ban_sender,
+            frame_cache,
             #[cfg(any(test, feature = "dev-context-only-utils"))]
             runtime_handle: runtime.clone(),
             #[cfg(any(test, feature = "dev-context-only-utils"))]
@@ -209,6 +246,10 @@ impl QuicDatagramEndpoint {
 
     pub fn key_updater(&self) -> Arc<KeyUpdateNotifier> {
         self.key_updater.clone()
+    }
+
+    pub fn frame_cache(&self) -> crate::frame_cache::FrameCache {
+        self.frame_cache.clone()
     }
 
     /// Obtain a sender for requesting temporary peer bans.

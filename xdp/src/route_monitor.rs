@@ -253,7 +253,7 @@ fn log_router_publish(route_table: RouteTable, router: &Router) {
 }
 
 fn log_router_rebuild(route_table: RouteTable, pending_rebuild: &PendingEvents) {
-    info!(
+    debug!(
         "rebuilding router table {route_table}: route_events={} neighbor_events={} link_events={} \
          error_events={}",
         pending_rebuild.routes,
