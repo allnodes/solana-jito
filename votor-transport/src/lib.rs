@@ -5,7 +5,11 @@ pub mod error;
 pub(crate) mod client;
 pub(crate) use error::close_codes;
 pub mod endpoint;
+pub mod epoch_word;
+pub mod frame_cache;
+pub(crate) mod ingress_budget;
 pub(crate) mod server;
+pub(crate) mod spare;
 pub(crate) mod stats;
 pub(crate) mod transport;
 
@@ -29,6 +33,12 @@ type PeerListSnapshot = Arc<PeerList>;
 pub type PeerListSender = watch::Sender<PeerListSnapshot>;
 
 pub type PeerListReceiver = watch::Receiver<PeerListSnapshot>;
+
+pub type SpareMap = Arc<HashMap<Pubkey, SocketAddr>>;
+
+pub type SpareSender = watch::Sender<SpareMap>;
+
+pub type SpareReceiver = watch::Receiver<SpareMap>;
 
 /// Maximum number of unique peer pubkeys we expect in steady state.
 /// Used to size buffers and channels, actual peer count is controlled

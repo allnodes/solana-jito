@@ -6,6 +6,12 @@ mod storage;
 pub mod tip_router;
 #[cfg(target_os = "linux")]
 mod xdp;
+#[cfg(target_os = "linux")]
+pub mod caps_check;
+#[cfg(target_os = "linux")]
+pub mod seccomp;
+#[cfg(target_os = "linux")]
+pub mod xdp_receive;
 
 pub use {args::add_args, execute::execute};
 

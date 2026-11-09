@@ -145,7 +145,8 @@ pub fn execute(
     } else {
         None
     };
-    let use_progress_bar = log_config.is_none();
+    let use_progress_bar =
+        log_config.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     agave_logger::initialize_logging(logfile);
 
     cli::warn_for_deprecated_arguments(matches);
@@ -193,6 +194,27 @@ pub fn execute(
         None
     } else {
         args::xdp_config::new_config(matches, &bind_addresses, poh_pinned_cpu_core)?
+    };
+
+    #[cfg(target_os = "linux")]
+    let xdp_chain_loading = matches.is_present("xdp_chain_loading");
+    #[cfg(target_os = "linux")]
+    let xdp_queue_base: Option<u32> = matches
+        .value_of("xdp_queue_base")
+        .map(|value| value.parse().expect("clap already accepted this queue number"));
+    #[cfg(target_os = "linux")]
+    let xdp_interface = matches.value_of("xdp_interface");
+
+    #[cfg(target_os = "linux")]
+    let xdp_receive_mode = match xdp_transmit_config.as_ref() {
+        None => super::xdp_receive::ReceiveMode::Off { missing: Vec::new() },
+        Some(xdp_config) => super::xdp_receive::decide(
+            xdp_interface,
+            xdp_config.zero_copy,
+            xdp_chain_loading,
+            xdp_config.queues.len(),
+            &caps::read(None, caps::CapSet::Permitted).unwrap_or_default(),
+        ),
     };
 
     let dynamic_port_range =
@@ -280,6 +302,13 @@ pub fn execute(
             "--num-votor-endpoints must be at most {MAX_ENDPOINTS}"
         ))?;
     }
+    #[cfg(target_os = "linux")]
+    let num_quic_endpoints = super::xdp_receive::quic_endpoints(
+        xdp_interface,
+        num_quic_endpoints,
+        matches.occurrences_of("num_quic_endpoints") > 0,
+        xdp_receive_mode.is_full(),
+    );
 
     let node_config = NodeConfig {
         advertised_ip,
@@ -299,6 +328,16 @@ pub fn execute(
 
     let exit = Arc::new(AtomicBool::new(false));
 
+    info!(
+        "Bound all network sockets as follows:\n{}",
+        allnodes_solana::format_sockets(&node.sockets)
+    );
+
+    let identity_path = match matches.value_of("identity") {
+        None | Some("ASK") => None,
+        Some(path) => PathBuf::from_str(path).ok(),
+    };
+
     #[cfg(not(target_os = "linux"))]
     let _ = config;
 
@@ -311,17 +350,49 @@ pub fn execute(
             Some(xdp_config) if xdp_config.zero_copy => XdpMode::ZeroCopy,
             Some(_) => XdpMode::Copy,
         };
-        capabilities::restrict(config.primordial_caps, needs_sys_nice, xdp_mode, || {
-            xdp_transmit_config.map(|xdp_config| {
-                xdp::build_xdp_transmit_setup(xdp_config, &node.bind_ip_addrs, exit.clone())
-            })
-        })?
-        .transpose()?
-        .unzip()
+        if let super::xdp_receive::ReceiveMode::Fatal(reason) = &xdp_receive_mode {
+            return Err(reason.clone().into());
+        }
+        let receive_caps = xdp_transmit_config
+            .as_ref()
+            .map(|_| super::xdp_receive::receive_caps(&xdp_receive_mode, xdp_chain_loading))
+            .unwrap_or_default();
+        let xdp_setup = capabilities::restrict(
+            config.primordial_caps,
+            needs_sys_nice,
+            xdp_mode,
+            receive_caps,
+            || {
+                xdp_transmit_config.map(|xdp_config| {
+                    xdp::build_xdp_transmit_setup(
+                        xdp_config,
+                        &node.bind_ip_addrs,
+                        exit.clone(),
+                        &node,
+                        xdp_receive_mode,
+                        xdp_chain_loading,
+                        xdp_queue_base,
+                    )
+                })
+            },
+        )?;
+
+        super::caps_check::restore_core_dumps();
+
+        super::seccomp::install_lockdown();
+
+        xdp_setup.transpose()?.unzip()
     };
 
     #[cfg(not(target_os = "linux"))]
     let (xdp_transmit_setup, xdp_network_config_report) = (None, None);
+
+    solana_core::allnodes::init(
+        &run_args.ledger_path,
+        identity_path.as_ref(),
+        expected_shred_version,
+        advertised_ip,
+    );
 
     solana_core::validator::report_target_features();
 
@@ -352,8 +423,6 @@ pub fn execute(
 
     let private_rpc = matches.is_present("private_rpc");
     let do_port_check = !matches.is_present("no_port_check");
-
-    let blockstore_cleanup_strategy = BlockstoreCleanupStrategy::from_clap_arg_match(matches)?;
 
     let debug_keys: Option<Arc<HashSet<_>>> = if matches.is_present("debug_key") {
         Some(Arc::new(
@@ -599,7 +668,7 @@ pub fn execute(
         votor_peer_overrides,
         repair_handler_type: RepairHandlerType::default(),
         gossip_validators,
-        blockstore_cleanup_strategy,
+        blockstore_cleanup_strategy: BlockstoreCleanupStrategy::None,
         blockstore_options: run_args.blockstore_options,
         run_verification: !matches.is_present("skip_startup_ledger_verification"),
         debug_keys,
@@ -822,6 +891,8 @@ pub fn execute(
         );
         *start_progress.write().unwrap() = ValidatorStartProgress::Initializing;
     }
+
+    validator_config.blockstore_cleanup_strategy = BlockstoreCleanupStrategy::from_clap_arg_match(matches)?;
 
     if operation == Operation::Initialize {
         info!("Validator ledger initialization complete");

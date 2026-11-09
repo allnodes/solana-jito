@@ -53,6 +53,28 @@ const PCI_IDS_PATHS: &[&str] = &["/usr/share/hwdata/pci.ids", "/usr/share/misc/p
 pub struct XdpNetworkConfigReport {
     pub zero_copy: bool,
     pub interface: String,
+    pub accelerated: Vec<String>,
+    pub receive: XdpReceiveState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XdpReceiveState {
+    Exclusive,
+    Chained,
+    Adopted,
+    Off,
+}
+
+#[cfg(target_os = "linux")]
+impl XdpReceiveState {
+    fn as_str(self) -> &'static str {
+        match self {
+            XdpReceiveState::Exclusive => "exclusive",
+            XdpReceiveState::Chained => "chained",
+            XdpReceiveState::Adopted => "adopted",
+            XdpReceiveState::Off => "off",
+        }
+    }
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -1228,6 +1250,12 @@ impl SystemMonitorService {
 
     #[cfg(target_os = "linux")]
     fn load_xdp_network_config_metrics(config: &XdpNetworkConfigReport) -> XdpNetworkConfigMetrics {
+        let config = &XdpNetworkConfigReport {
+            zero_copy: config.zero_copy,
+            interface: agave_xdp::bond::physical_device(&config.interface),
+            receive: config.receive,
+            accelerated: config.accelerated.clone(),
+        };
         let Ok(device) = NetworkDevice::new(&config.interface) else {
             warn!(
                 "failed to get xdp network config device for interface {}",
@@ -1309,6 +1337,8 @@ impl SystemMonitorService {
             "xdp-network-config",
             "driver" => metrics.driver.clone(),
             "zero_copy" => config.zero_copy.to_string(),
+            "receive" => config.receive.as_str(),
+            ("accelerated", config.accelerated.join("+"), String),
             ("kernel_version", metrics.kernel_version.clone(), String),
             ("vendor", metrics.vendor.clone(), String),
             ("model", metrics.model.clone(), String),
@@ -1335,6 +1365,7 @@ impl SystemMonitorService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn test_parse_pci_database_device_names() {

@@ -296,6 +296,8 @@ pub fn receiver(
     coalesce: Option<Duration>,
     is_staked_service: bool,
 ) -> JoinHandle<()> {
+    #[cfg(target_os = "linux")]
+    crate::xdp_udp::attach_receiver(&socket, &packet_batch_sender, &stats, is_staked_service);
     Builder::new()
         .name(thread_name)
         .spawn(move || {

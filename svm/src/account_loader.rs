@@ -235,6 +235,10 @@ impl<'a, CB: AccountLoadCallback> AccountLoader<'a, CB> {
         }
     }
 
+    pub(crate) fn inner_callbacks(&self) -> &'a CB {
+        self.callbacks
+    }
+
     // Load an account either from our own store or accounts-db, with a wrapper type
     // that includes the effective size for loaded transaction data size accounting.
     pub(crate) fn load_account(

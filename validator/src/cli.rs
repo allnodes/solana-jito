@@ -72,6 +72,7 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
         .subcommand(commands::monitor::command())
         .subcommand(SubCommand::with_name("run").about("Run the validator"))
         .subcommand(commands::plugin::command())
+        .subcommand(commands::reset_xdp_interface::command())
         .subcommand(commands::set_identity::command())
         .subcommand(commands::set_event_filter::command())
         .subcommand(commands::set_log_filter::command())
@@ -372,7 +373,7 @@ impl DefaultArgs {
             bind_address: "0.0.0.0".to_string(),
             ledger_path: "ledger".to_string(),
             dynamic_port_range: format!("{}-{}", VALIDATOR_PORT_RANGE.0, VALIDATOR_PORT_RANGE.1),
-            maximum_local_snapshot_age: "2500".to_string(),
+            maximum_local_snapshot_age: "500".to_string(),
             tower_storage: "file".to_string(),
             #[allow(deprecated)]
             send_transaction_service_config: send_transaction_service::Config::default(),
