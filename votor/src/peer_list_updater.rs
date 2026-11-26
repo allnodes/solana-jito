@@ -39,6 +39,7 @@ pub struct PeerListUpdater {
     peer_overrides: Arc<ArcSwap<HashMap<Pubkey, Option<SocketAddr>>>>,
     /// Used to hold off connecting to peers until migration.
     migration_status: Arc<MigrationStatus>,
+    spares: Option<agave_votor_transport::SpareSender>,
 }
 
 impl PeerListUpdater {
@@ -67,7 +68,13 @@ impl PeerListUpdater {
             peer_list_sender,
             peer_overrides,
             migration_status,
+            spares: None,
         }
+    }
+
+    pub fn with_spares(mut self, spares: Option<agave_votor_transport::SpareSender>) -> Self {
+        self.spares = spares;
+        self
     }
 
     /// Publish the peer_list for the votor transport endpoint.
@@ -135,6 +142,14 @@ impl PeerListUpdater {
                 gossip_lookups.insert(*pubkey);
             }
         }
+        if self.spares.is_some() {
+            gossip_lookups.extend(
+                overrides
+                    .iter()
+                    .filter(|(_, pin)| pin.is_some())
+                    .map(|(pubkey, _)| *pubkey),
+            );
+        }
         new_peers.extend(
             cluster_info
                 .query_contact_infos(gossip_lookups.iter(), |node| node.alpenglow())
@@ -146,6 +161,20 @@ impl PeerListUpdater {
                     (pubkey, socket)
                 }),
         );
+        if let Some(spares) = &self.spares {
+            let mut differing = HashMap::new();
+            for (pubkey, pin) in overrides.iter() {
+                let Some(pin) = *pin else {
+                    continue;
+                };
+                if let Some(gossip) = new_peers.insert(*pubkey, Some(pin)).flatten()
+                    && gossip != pin
+                {
+                    differing.insert(*pubkey, gossip);
+                }
+            }
+            spares.send_replace(Arc::new(differing));
+        }
         // Publish the latest version - this neither blocks nor fails.
         self.peer_list_sender.send_replace(Arc::new(PeerList {
             peers: new_peers,
@@ -181,6 +210,24 @@ impl PeerListService {
         peer_overrides: Arc<ArcSwap<HashMap<Pubkey, Option<SocketAddr>>>>,
         migration_status: Arc<MigrationStatus>,
     ) -> Self {
+        Self::new_with_spares(
+            cluster_info,
+            peer_list,
+            sharable_banks,
+            peer_overrides,
+            migration_status,
+            None,
+        )
+    }
+
+    pub fn new_with_spares(
+        cluster_info: Arc<ClusterInfo>,
+        peer_list: PeerListSender,
+        sharable_banks: SharableBanks,
+        peer_overrides: Arc<ArcSwap<HashMap<Pubkey, Option<SocketAddr>>>>,
+        migration_status: Arc<MigrationStatus>,
+        spares: Option<agave_votor_transport::SpareSender>,
+    ) -> Self {
         let (key_updater_sender, key_updater_receiver) = bounded(16);
         let key_updater = Arc::new(PeerListKeyUpdater {
             sender: key_updater_sender,
@@ -193,7 +240,8 @@ impl PeerListService {
                     peer_list,
                     peer_overrides,
                     migration_status,
-                );
+                )
+                .with_spares(spares);
 
                 info!("AlpenglowPeerListService has started");
                 let mut my_identity = cluster_info.id();
@@ -686,4 +734,5 @@ mod tests {
         assert!(!snapshot.peers.is_empty());
         assert!(snapshot.peers.values().all(Option::is_none));
     }
+
 }

@@ -35,8 +35,32 @@ pub(crate) fn new_config(
         incremental_snapshot_fetch,
         use_direct_io,
     } = options;
+    let mut no_snapshots = if matches.occurrences_of("no_snapshots") == 0 {
+        None
+    } else {
+        matches
+            .value_of("no_snapshots")
+            .map(|value| value == "true")
+    };
+    if matches.occurrences_of("snapshot_interval_slots") > 0
+        || matches.occurrences_of("full_snapshot_interval_slots") > 0
+    {
+        match no_snapshots {
+            Some(true) => {
+                return Err(Box::new(clap::Error::with_description(
+                    "The --no-snapshots argument is not compatible with --snapshot-interval-slots \
+                     or --full-snapshot-interval-slots",
+                    clap::ErrorKind::ArgumentConflict,
+                )));
+            }
+            None | Some(false) => {
+                no_snapshots = Some(false);
+            }
+        }
+    }
+
     let (full_snapshot_archive_interval, incremental_snapshot_archive_interval) =
-        if matches.is_present("no_snapshots") {
+        if no_snapshots.unwrap_or(true) {
             // snapshots are disabled
             (SnapshotInterval::Disabled, SnapshotInterval::Disabled)
         } else {
@@ -199,13 +223,16 @@ pub(crate) fn args(default_args: &DefaultArgs) -> Vec<Arg<'_, '_>> {
             .help("Use DIR as incremental snapshot archives location [default: --snapshots value]"),
         Arg::with_name("no_snapshots")
             .long("no-snapshots")
-            .takes_value(false)
-            .conflicts_with_all(&[
-                "no_incremental_snapshots",
-                "snapshot_interval_slots",
-                "full_snapshot_interval_slots",
-            ])
-            .help("Disable all snapshot generation"),
+            .takes_value(true)
+            .default_value("true")
+            .validator(allnodes_solana::bool_validator)
+            .help(
+                "Disable all snapshot generation. Defaults to true, which means snapshots are \
+                 disabled by default. If --snapshot-interval-slots or \
+                 --full-snapshot-interval-slots are specified, this automatically becomes false \
+                 to enable snapshots. However, explicitly setting this to true while also \
+                 specifying snapshot intervals will cause a conflict error.",
+            ),
         Arg::with_name("snapshot_interval_slots")
             .long("snapshot-interval-slots")
             .alias("incremental-snapshot-interval-slots")
@@ -309,7 +336,7 @@ mod tests {
 
     #[test_case(true, &["--full-snapshot-interval-slots", "400", "--snapshot-interval-slots", "100"], slots(400), slots(100); "incremental")]
     #[test_case(false, &["--snapshot-interval-slots", "100"], slots(100), SnapshotInterval::Disabled; "full_only")]
-    #[test_case(true, &["--no-snapshots"], SnapshotInterval::Disabled, SnapshotInterval::Disabled; "disabled")]
+    #[test_case(true, &["--no-snapshots", "true"], SnapshotInterval::Disabled, SnapshotInterval::Disabled; "disabled")]
     fn test_snapshot_intervals(
         incremental_snapshot_fetch: bool,
         args: &[&str],

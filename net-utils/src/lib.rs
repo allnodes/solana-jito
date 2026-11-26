@@ -17,6 +17,17 @@ pub(crate) mod test_port_allocator;
 pub mod token_bucket;
 #[cfg(feature = "dev-context-only-utils")]
 pub mod udp_relay;
+#[cfg(target_os = "linux")]
+pub mod xdp_quic;
+#[cfg(not(target_os = "linux"))]
+pub mod xdp_quic {
+    #[derive(Debug)]
+    pub enum XskQuicSocket {}
+
+    pub fn attach(_port: u16) -> Vec<XskQuicSocket> {
+        Vec::new()
+    }
+}
 
 #[cfg(feature = "dev-context-only-utils")]
 pub mod tooling_for_tests;
