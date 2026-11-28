@@ -45,15 +45,16 @@ pub(crate) enum PeerState {
         // This is cached at install so reconcile can
         // detect an address change without locking quinn state.
         target_address: SocketAddr,
+        quota: Option<crate::ingress_budget::Quota>,
     },
 }
 
 /// `Ok` carries the peer and its newly established connection; `Err` carries
 /// the peer we tried (and failed) to connect to.
-type HandshakeOutcome = Result<(Pubkey, Connection), Pubkey>;
+pub(crate) type HandshakeOutcome = Result<(Pubkey, Connection), Pubkey>;
 
 /// Enforce the send-only contract of an outbound connection.
-async fn reject_reverse_datagrams(peer: Pubkey, connection: Connection) {
+pub(crate) async fn reject_reverse_datagrams(peer: Pubkey, connection: Connection) {
     if connection.read_datagram().await.is_ok() {
         warn!("Peer {peer} sent a datagram on a send-only connection; closing.");
         close_codes::FLOODING.close(&connection);
@@ -61,7 +62,7 @@ async fn reject_reverse_datagrams(peer: Pubkey, connection: Connection) {
 }
 
 /// Open and authenticate a new connection to `peer` at `addr`.
-async fn connect(
+pub(crate) async fn connect(
     endpoint: Endpoint,
     peer: Pubkey,
     addr: SocketAddr,
@@ -109,6 +110,9 @@ pub(crate) struct OutboundLoop {
     cancel: CancellationToken,
     stats: Arc<ClientStats>,
     max_datagrams_per_second_per_peer: usize,
+    cache: crate::frame_cache::CacheState,
+    frame_cache: crate::frame_cache::FrameCache,
+    spares: crate::spare::Spares,
 }
 
 impl OutboundLoop {
@@ -121,6 +125,7 @@ impl OutboundLoop {
         cancel: CancellationToken,
         max_datagrams_per_second_per_peer: usize,
     ) -> Self {
+        let (cache, frame_cache) = crate::frame_cache::CacheState::new();
         Self {
             endpoint,
             local_pubkey,
@@ -133,7 +138,26 @@ impl OutboundLoop {
             cancel,
             stats: Arc::default(),
             max_datagrams_per_second_per_peer,
+            cache,
+            frame_cache,
+            spares: crate::spare::Spares::default(),
         }
+    }
+
+    pub(crate) fn with_epoch(mut self, epoch_word: crate::epoch_word::EpochSource) -> Self {
+        let (cache, frame_cache) = crate::frame_cache::CacheState::with_epoch(epoch_word);
+        self.cache = cache;
+        self.frame_cache = frame_cache;
+        self
+    }
+
+    pub(crate) fn with_spares(mut self, spares: crate::SpareReceiver) -> Self {
+        self.spares = crate::spare::Spares::new(spares);
+        self
+    }
+
+    pub(crate) fn frame_cache(&self) -> crate::frame_cache::FrameCache {
+        self.frame_cache.clone()
     }
 
     pub(crate) async fn run(mut self) {
@@ -148,6 +172,7 @@ impl OutboundLoop {
 
         info!("Votor QUIC transport client ready.");
         loop {
+            let next_sample = self.cache.next_due();
             tokio::select! {
                 changed = self.key_updates.receiver.changed() => {
                     if changed.is_err() {
@@ -176,6 +201,12 @@ impl OutboundLoop {
                     let outcome = joined.expect("outbound handshake task panicked or was aborted");
                     self.handle_handshake_outcome(outcome);
                 }
+                Some(joined) = self.spares.next_handshake() => {
+                    let outcome = joined.expect("spare handshake task panicked or was aborted");
+                    if let Some(peer) = self.spares.handshake_done(outcome, self.cache.profile()) {
+                        self.cache.attach(&peer, tokio::time::Instant::now());
+                    }
+                }
                 Some(joined) = self.reverse_datagram_readers.join_next() => {
                     joined.expect("outbound reverse-datagram reader task panicked or was aborted");
                 }
@@ -189,6 +220,29 @@ impl OutboundLoop {
                         break;
                     };
                     self.handle_egress_message(message);
+                }
+                Some(request) = self.cache.recv() => {
+                    if request.origin != self.local_pubkey {
+                        continue;
+                    }
+                    while let Ok(queued) = self.egress_receiver.try_recv() {
+                        self.handle_egress_message(queued);
+                    }
+                    self.cache.insert(
+                        request,
+                        &self.peer_state,
+                        self.spares.table(),
+                        tokio::time::Instant::now(),
+                    );
+                }
+                _ = tokio::time::sleep_until(next_sample.unwrap_or_else(tokio::time::Instant::now)),
+                    if next_sample.is_some() =>
+                {
+                    self.cache.sweep(
+                        &self.peer_state,
+                        self.spares.table(),
+                        tokio::time::Instant::now(),
+                    );
                 }
                 // Periodic reconcile: connect to missing peers, drop departed peers.
                 _ = reconcile_timer.tick() => self.reconcile(),
@@ -221,6 +275,8 @@ impl OutboundLoop {
         // want them as they began under the old identity.
         self.in_flight_handshakes = JoinSet::new();
         self.reverse_datagram_readers = JoinSet::new();
+        self.cache.clear();
+        self.spares.clear();
         let closed = self
             .peer_state
             .drain()
@@ -248,6 +304,16 @@ impl OutboundLoop {
     /// Reconcile the connection table against the current peer_list.
     fn reconcile(&mut self) {
         debug!("OutboundLoop: running reconcile");
+        let profile = self.cache.profile();
+        for state in self.peer_state.values() {
+            if let PeerState::Established {
+                quota: Some(quota), ..
+            } = state
+            {
+                quota.refresh(profile);
+            }
+        }
+        self.spares.refresh(profile);
         let peer_list = self.peer_list_receiver.borrow().clone();
         // With pushing off every peer we hold counts as departed.
         let push_enabled = peer_list.push_enabled;
@@ -275,6 +341,20 @@ impl OutboundLoop {
             .connection_closed_not_in_peer_list
             .fetch_add(closed_not_in_peer_list, Ordering::Relaxed);
 
+        if push_enabled {
+            for (peer, addr) in peer_list.peers.iter() {
+                if let Some(addr) = addr {
+                    self.spares.exchange(*peer, *addr, &mut self.peer_state);
+                }
+            }
+        }
+        self.spares.reconcile(
+            &self.endpoint,
+            &self.stats,
+            &peer_list,
+            self.local_pubkey,
+            &self.peer_state,
+        );
         if !push_enabled {
             return;
         }
@@ -297,6 +377,7 @@ impl OutboundLoop {
                 Some(PeerState::Established {
                     connection,
                     target_address: cur,
+                    ..
                 }) => {
                     // desired peer address has changed
                     if cur != addr {
@@ -340,6 +421,10 @@ impl OutboundLoop {
     /// message is dropped. Broken connections are dropped from the table so the
     /// next reconcile remakes them.
     fn handle_egress_message(&mut self, egress_message: EgressMessage) {
+        let addressee = match &egress_message {
+            EgressMessage::Broadcast(_) => None,
+            EgressMessage::Unicast { peer, .. } => Some(*peer),
+        };
         // Both arms build the same chain type, with one side always empty.
         let (message, targets) = match egress_message {
             EgressMessage::Broadcast(message) => {
@@ -361,10 +446,17 @@ impl OutboundLoop {
         };
         let mut sent = 0u64;
         let mut dead_peers = Vec::new();
+        let profile = self.cache.profile();
         for (peer, state) in targets {
-            let PeerState::Established { connection, .. } = state else {
+            let PeerState::Established {
+                connection, quota, ..
+            } = state
+            else {
                 continue;
             };
+            if let Some(quota) = quota {
+                quota.refresh(profile);
+            }
             match connection.send_datagram(message.clone()) {
                 Ok(()) => sent = sent.saturating_add(1),
                 Err(SendDatagramError::ConnectionLost(reason)) => {
@@ -391,6 +483,12 @@ impl OutboundLoop {
         for peer in dead_peers {
             self.peer_state.remove(&peer);
         }
+        let spare_sent =
+            self.spares
+                .broadcast(&message, addressee.as_ref(), &self.peer_state, profile);
+        self.stats
+            .datagrams_sent
+            .fetch_add(spare_sent, Ordering::Relaxed);
     }
 
     /// Handle a handshake task that ran to completion.
@@ -399,11 +497,16 @@ impl OutboundLoop {
         // leaves `Connecting` entries in place, and identity rotation resets the JoinSet.
         match outcome {
             Ok((peer, connection)) => {
+                let quota = crate::ingress_budget::GuardBudget::handle(&connection);
+                if let Some(quota) = &quota {
+                    quota.refresh(self.cache.profile());
+                }
                 let target_address = connection.remote_address();
                 let reverse_datagram_reader = connection.clone();
                 let previous = self.peer_state.insert(
                     peer,
                     PeerState::Established {
+                        quota,
                         connection,
                         target_address,
                     },
@@ -414,6 +517,7 @@ impl OutboundLoop {
                 );
                 self.reverse_datagram_readers
                     .spawn(reject_reverse_datagrams(peer, reverse_datagram_reader));
+                self.cache.attach(&peer, tokio::time::Instant::now());
                 info!("OutboundLoop: established connection to {peer}.");
                 stats::record_connection_count(&self.stats.peak_connections, self.total_peers());
             }

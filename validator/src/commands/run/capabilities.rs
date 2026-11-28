@@ -30,20 +30,25 @@ pub(super) fn restrict<T>(
     primordial_caps: CapsHashSet,
     needs_sys_nice: bool,
     xdp_mode: XdpMode,
+    receive: super::caps_check::ReceiveCaps,
     with_xdp_caps: impl FnOnce() -> T,
 ) -> Result<T, Box<dyn Error>> {
-    let (required_caps, retained_caps) =
+    let (mut required_caps, retained_caps) =
         compute_capability_sets(&primordial_caps, needs_sys_nice, xdp_mode);
+    required_caps.extend(&receive.required);
     let mut supported_caps = primordial_caps;
     supported_caps.extend(SUPPORTED_CAPS);
+    supported_caps.insert(Capability::CAP_SYS_ADMIN);
 
     let permitted_caps = caps::read(None, CapSet::Permitted)
         .map_err(|err| format!("failed to read permitted capabilities: {err}"))?;
+    required_caps.extend(receive.opportunistic.intersection(&permitted_caps));
+    let named_caps = receive.remediation(&required_caps);
     let missing_caps: Vec<_> = required_caps.difference(&permitted_caps).collect();
     if !missing_caps.is_empty() {
-        return Err(format!(
-            "the current configuration requires the following capabilities, which have not been \
-             permitted to the current process: {missing_caps:?}"
+        return Err(super::caps_check::explain_missing(
+            &named_caps,
+            missing_caps.into_iter().copied(),
         )
         .into());
     }
@@ -52,6 +57,12 @@ pub(super) fn restrict<T>(
         warn!(
             "dropping extraneous capabilities ({extra_caps:?}) from the current process. consider \
              removing them from your operational configuration.",
+        );
+    }
+    if !receive.degraded.is_empty() {
+        warn!(
+            "{}",
+            super::caps_check::explain_degraded(&named_caps, receive.degraded.iter().copied())
         );
     }
 
@@ -124,7 +135,14 @@ mod tests {
         // Capabilities are per thread, so the dropped ones only affect this thread
         std::thread::spawn(|| {
             assert_eq!(
-                restrict(CapsHashSet::new(), false, XdpMode::Disabled, || 42).unwrap(),
+                restrict(
+                    CapsHashSet::new(),
+                    false,
+                    XdpMode::Disabled,
+                    super::super::caps_check::ReceiveCaps::default(),
+                    || 42
+                )
+                .unwrap(),
                 42
             );
             for set in [CapSet::Effective, CapSet::Permitted] {

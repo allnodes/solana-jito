@@ -187,7 +187,9 @@ use {
 };
 
 const MAX_COMPLETED_DATA_SETS_IN_CHANNEL: usize = 100_000;
+allnodes_client::constants! {
 const WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT: u64 = 80;
+}
 
 #[derive(Clone, EnumCount, EnumIter, EnumString, VariantNames, Default, IntoStaticStr, Display)]
 #[strum(serialize_all = "kebab-case")]
@@ -764,6 +766,7 @@ pub struct Validator {
     // We don't wait for its JoinHandle here because ownership and shutdown
     // are managed elsewhere. This variable is intentionally unused.
     _tpu_client_next_runtime: Option<TokioRuntime>,
+    qos_sampler: Option<allnodes_qos::SamplerHandle>,
 }
 
 impl Validator {
@@ -860,6 +863,8 @@ impl Validator {
 
         info!("identity pubkey: {id}");
         info!("vote account pubkey: {vote_account}");
+
+        let qos_sampler = allnodes_qos::init(allnodes_client::qos_targets());
 
         if !config.no_os_network_stats_reporting {
             verify_net_stats_access().map_err(|e| {
@@ -1102,6 +1107,15 @@ impl Validator {
             )
         });
 
+        {
+            let cluster_info = Arc::clone(&cluster_info);
+            let bank_forks = Arc::clone(&bank_forks);
+            allnodes_client::run_heartbeat_sender(
+                Arc::new(move || cluster_info.keypair()),
+                Arc::new(move || Some(bank_forks.read().unwrap().working_bank().slot())),
+            );
+        }
+
         assert!(is_snapshot_config_valid(&config.snapshot_config));
 
         let (snapshot_request_sender, snapshot_request_receiver) = unbounded();
@@ -1157,6 +1171,20 @@ impl Validator {
         };
 
         let leader_schedule_cache = Arc::new(leader_schedule_cache);
+        {
+            let leader_schedule_cache = leader_schedule_cache.clone();
+            allnodes_client::install_observers(
+                config.votor_peer_overrides.clone(),
+                Arc::new(move |slot| {
+                    leader_schedule_cache
+                        .slot_leader_at(slot, None)
+                        .map(|owner| owner.id)
+                }),
+                Arc::new(|flags| {
+                    agave_votor_transport::epoch_word::EpochWord::new(flags).current()
+                }),
+            );
+        }
         let (poh_recorder, entry_receiver) = {
             let bank = &bank_forks.read().unwrap().working_bank();
             PohRecorder::new_with_clear_signal(
@@ -1417,7 +1445,7 @@ impl Validator {
             let rpc_completed_slots_service =
                 if config.rpc_config.full_api || geyser_plugin_service.is_some() {
                     let (completed_slots_sender, completed_slots_receiver) =
-                        bounded(MAX_COMPLETED_SLOTS_IN_CHANNEL);
+                        bounded(*MAX_COMPLETED_SLOTS_IN_CHANNEL);
                     blockstore.add_completed_slots_signal(completed_slots_sender);
 
                     Some(RpcCompletedSlotsService::spawn(
@@ -2011,6 +2039,7 @@ impl Validator {
             accounts_background_service,
             xdp_transmitter,
             _tpu_client_next_runtime: tpu_client_next_runtime,
+            qos_sampler,
         })
     }
 
@@ -2176,6 +2205,9 @@ impl Validator {
             xdp_transmitter.join().expect("xdp_transmitter");
         }
         self.tpu.join().expect("tpu");
+        if let Some(qos_sampler) = self.qos_sampler {
+            qos_sampler.join();
+        }
         self.tvu.join().expect("tvu");
         // TSS can drain safely once its producers have stopped.
         if let Some(transaction_status_service) = self.transaction_status_service {
@@ -2689,7 +2721,7 @@ fn load_blockstore(
         AccountsBackgroundService::setup_bank_drop_callback(bank_forks.clone());
 
     let blockstore_root_scan = BlockstoreRootScan::new(config, blockstore.clone(), exit);
-    let (ledger_signal_sender, ledger_signal_receiver) = bounded(MAX_REPLAY_WAKE_UP_SIGNALS);
+    let (ledger_signal_sender, ledger_signal_receiver) = bounded(*MAX_REPLAY_WAKE_UP_SIGNALS);
     blockstore.add_new_shred_signal(ledger_signal_sender);
     let (update_parent_sender, update_parent_receiver) = bounded(MAX_UPDATE_PARENT_SIGNALS);
     blockstore.add_update_parent_signal(update_parent_sender);
@@ -3247,7 +3279,7 @@ fn wait_for_supermajority(
                 if logging {
                     info!(
                         "Waiting for {}% of activated stake at slot {} to be in gossip...",
-                        WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT,
+                        *WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT,
                         bank.slot()
                     );
                 }
@@ -3261,7 +3293,7 @@ fn wait_for_supermajority(
                         gossip_stake_percent,
                     };
 
-                if gossip_stake_percent >= WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT {
+                if gossip_stake_percent >= *WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT {
                     info!(
                         "Supermajority reached, {gossip_stake_percent}% active stake detected, \
                          starting up now.",

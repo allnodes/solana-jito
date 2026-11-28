@@ -11,6 +11,7 @@ pub mod plugin;
 pub mod relayer;
 pub mod repair_shred_from_peer;
 pub mod repair_whitelist;
+pub mod reset_xdp_interface;
 pub mod run;
 pub mod set_event_filter;
 pub mod set_identity;

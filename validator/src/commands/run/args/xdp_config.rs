@@ -69,6 +69,14 @@ pub(crate) fn new_config(
             }
         }
     };
+    let cpus = cpus.map(|cpus| {
+        super::super::xdp_receive::transmit_cores(
+            cpus,
+            xdp_interface,
+            xdp_cpu_cores.is_some(),
+            poh_pinned_cpu_core,
+        )
+    });
     Ok(cpus.map(|cpus| {
         info!("XDP enabled on CPU cores: {cpus:?}");
         // Map the CPU list onto hardware queues sequentially (queue i -> cpus[i]).
@@ -90,15 +98,19 @@ pub(crate) fn args<'a, 'b>() -> Vec<Arg<'a, 'b>> {
             .long("no-xdp")
             .takes_value(false)
             .conflicts_with("no_xdp_zero_copy")
-            .help("Disable XDP transmit and fall back to UDP sockets"),
+            .help(
+                "Disable XDP entirely: shreds are sent through ordinary UDP sockets and \
+                 every port is received through the kernel",
+            ),
         Arg::with_name("xdp_interface")
             .long("xdp-interface")
             .takes_value(true)
             .value_name("INTERFACE")
             .conflicts_with("no_xdp")
             .help(
-                "Network interface to use for XDP transmit. Auto-detected from default route if \
-                 not specified",
+                "Network interface to use for XDP: shred transmit, and receive for the TPU, \
+                 turbine and repair ports, over AF_XDP on the same NIC (or every slave of an \
+                 802.3ad bond). Auto-detected from the default route if not specified",
             ),
         Arg::with_name("xdp_cpu_cores")
             .long("xdp-cpu-cores")
@@ -107,21 +119,51 @@ pub(crate) fn args<'a, 'b>() -> Vec<Arg<'a, 'b>> {
             .conflicts_with("no_xdp")
             .validator(|value| validate_cpu_ranges(value, "--xdp-cpu-cores"))
             .help(
-                "CPU cores to reserve for XDP transmit (e.g. \"2-4,7\"). Defaults to 1 \
-                 auto-selected core",
+                "CPU cores to reserve for XDP transmit (e.g. \"2-4,7\"). Defaults to one \
+                 core per physical device behind the interface, so every slave of a bond \
+                 gets a transmit loop",
+            ),
+        Arg::with_name("xdp_queue_base")
+            .long("xdp-queue-base")
+            .takes_value(true)
+            .value_name("QUEUE")
+            .conflicts_with("no_xdp")
+            .validator(|value| value.parse::<u32>().map(|_| ()).map_err(|err| err.to_string()))
+            .help(
+                "First NIC receive queue this instance may use. Left unset, a free range is \
+                 found by probing, so a second XDP consumer on the same interface — another \
+                 validator, or another product — settles above the first one on its own. Set it \
+                 to pin the range instead, which is worth doing when interrupt affinity is \
+                 tuned by hand: probing is first-come-first-served and depends on start order",
             ),
         Arg::with_name("xdp_zero_copy")
             .long("xdp-zero-copy")
             .takes_value(false)
             .conflicts_with("no_xdp")
             .conflicts_with("no_xdp_zero_copy")
-            .help("Enable XDP zero copy mode. Requires hardware and driver support"),
+            .help(
+                "Enable XDP zero copy. Requires hardware and driver support, and makes \
+                 the receive path mandatory: what would otherwise be given up with a \
+                 warning becomes a refusal to start",
+            ),
         Arg::with_name("no_xdp_zero_copy")
             .long("no-xdp-zero-copy")
             .takes_value(false)
             .conflicts_with("xdp_zero_copy")
             .conflicts_with("no_xdp")
             .help("Use XDP copy mode"),
+        Arg::with_name("xdp_chain_loading")
+            .long("xdp-chain-loading")
+            .takes_value(false)
+            .conflicts_with("no_xdp")
+            .help(
+                "Install the XDP program via a dispatcher so other XDP programs can \
+                 coexist on the same interface (chain loading), instead of taking the \
+                 interface's XDP hook exclusively. Adds a small per-packet dispatcher \
+                 cost, and needs cap_sys_admin. Not needed to recover from a previous \
+                 chain-loaded run: an exclusive start removes its own leftover program \
+                 by itself",
+            ),
     ]
 }
 
