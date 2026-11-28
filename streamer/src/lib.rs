@@ -8,6 +8,8 @@ pub mod quic;
 mod recvmmsg;
 pub mod sendmmsg;
 pub mod streamer;
+#[cfg(target_os = "linux")]
+pub mod xdp_udp;
 
 #[macro_use]
 extern crate log;

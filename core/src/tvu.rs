@@ -335,25 +335,35 @@ impl Tvu {
                 push_enabled: false,
             }));
         let sharable_banks = bank_forks.read().unwrap().sharable_banks();
-        let peer_list_service = PeerListService::new(
+        let (votor_spare_sender, votor_spare_receiver) = watch::channel(Arc::default());
+        let peer_list_service = PeerListService::new_with_spares(
             cluster_info.clone(),
             votor_peer_list_sender,
             sharable_banks.clone(),
             votor_peer_overrides,
             migration_status.clone(),
+            Some(votor_spare_sender),
         );
-        let (votor_egress, endpoint) = QuicDatagramEndpoint::spawn(
+        let (votor_egress, endpoint) = QuicDatagramEndpoint::spawn_with_epoch(
             &votor_rt_handle,
             &cluster_info.keypair(),
             votor_server_sockets,
             votor_client_socket,
             votor_ingress_sender,
-            votor_peer_list_receiver,
+            (
+                votor_peer_list_receiver,
+                Arc::new(allnodes_client::qos_epoch),
+                Some(votor_spare_receiver),
+            ),
             *cluster_info.socket_addr_space(),
             votor_rate_limit_pps(),
             cancel,
         )
         .map_err(|e| format!("alpenglow endpoint: {e:?}"))?;
+        let frame_filter = agave_votor::frame_filter::FrameFilter::new(
+            leader_schedule_cache.clone(),
+            endpoint.frame_cache(),
+        );
         {
             let mut key_notifiers = key_notifiers.write().unwrap();
             key_notifiers.add(KeyUpdaterType::Votor, endpoint.key_updater());
@@ -459,7 +469,7 @@ impl Tvu {
 
         // Create completed slots channel for BlockIdRepairService
         let (completed_slots_sender, completed_slots_receiver) =
-            bounded(MAX_COMPLETED_SLOTS_IN_CHANNEL);
+            bounded(*MAX_COMPLETED_SLOTS_IN_CHANNEL);
         blockstore.add_completed_slots_signal(completed_slots_sender);
 
         let block_id_repair_channels = BlockIdRepairChannels {
@@ -646,6 +656,7 @@ impl Tvu {
 
         let bls_voting_service = BLSVotingService::new(
             bls_receiver,
+            Some(frame_filter),
             cluster_info.clone(),
             votor_egress,
             highest_finalized,

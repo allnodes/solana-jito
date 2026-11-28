@@ -277,8 +277,10 @@ impl Tpu {
         // have the same bind IP:PORT.
 
         // Streamer for TPU
-        let transactions_quic_sockets =
-            into_quic_sockets(transactions_quic_sockets, quic_xdp_sender.as_ref());
+        let transactions_quic_sockets = with_xsk_receive(into_quic_sockets(
+            transactions_quic_sockets,
+            quic_xdp_sender.as_ref(),
+        ));
         let SpawnServerResult {
             endpoints: _,
             thread: tpu_quic_t,
@@ -297,8 +299,10 @@ impl Tpu {
         .unwrap();
 
         // Streamer for TPU forward
-        let transactions_forwards_quic_sockets =
-            into_quic_sockets(transactions_forwards_quic_sockets, quic_xdp_sender.as_ref());
+        let transactions_forwards_quic_sockets = with_xsk_receive(into_quic_sockets(
+            transactions_forwards_quic_sockets,
+            quic_xdp_sender.as_ref(),
+        ));
         let SpawnServerResult {
             endpoints: _,
             thread: tpu_forwards_quic_t,
@@ -606,4 +610,21 @@ impl Tpu {
         }
         Ok(())
     }
+}
+
+fn with_xsk_receive(sockets: impl Iterator<Item = QuicSocket>) -> Vec<QuicSocket> {
+    let mut sockets: Vec<QuicSocket> = sockets.collect();
+    let port = sockets.iter().find_map(|socket| match socket {
+        QuicSocket::Xdp(parts) => parts.socket.local_addr().ok().map(|addr| addr.port()),
+        _ => None,
+    });
+    if let Some(port) = port {
+        let mut xsks = solana_net_utils::xdp_quic::attach(port).into_iter();
+        for socket in &mut sockets {
+            if let QuicSocket::Xdp(parts) = socket {
+                parts.xsk = xsks.next().map(Box::new);
+            }
+        }
+    }
+    sockets
 }

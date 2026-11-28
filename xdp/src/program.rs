@@ -60,6 +60,89 @@ pub fn load_xdp_program(dev: &NetworkDevice) -> Result<Ebpf, Box<dyn std::error:
     Ok(ebpf)
 }
 
+pub fn load_rx_program(
+    dev: &NetworkDevice,
+    require_native: bool,
+) -> Result<Ebpf, Box<dyn std::error::Error>> {
+    let mut loader = EbpfLoader::new();
+    if dev.driver().map(|d| d == "i40e").unwrap_or(false) {
+        loader.override_global("AGAVE_XDP_DROP_MULTI_FRAGS", &1u8, true);
+    }
+    let mut ebpf = loader.load(agave_xdp_ebpf::AGAVE_XDP_EBPF_PROGRAM)?;
+    {
+        let p: &mut Xdp = ebpf.program_mut("agave_xdp_rx").unwrap().try_into().unwrap();
+        p.load()?;
+        attach_rx(p, dev, require_native)?;
+    }
+    Ok(ebpf)
+}
+
+fn attach_rx(
+    p: &mut Xdp,
+    dev: &NetworkDevice,
+    require_native: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match p.attach_to_if_index(dev.if_index(), XdpMode::Driver) {
+        Ok(_) => Ok(()),
+        Err(e) if is_hook_busy(&e) => Err(hook_conflict_error(dev)),
+        Err(e) if require_native => Err(format!(
+            "--xdp-zero-copy requires the XDP program to attach in native (driver) mode, which \
+             failed on {}: {e}. The driver may not support native XDP — start without \
+             --xdp-zero-copy to run in copy mode instead",
+            dev.name()
+        )
+        .into()),
+        Err(e) => {
+            log::debug!("xdp rx: native attach to {} failed ({e}); using skb mode", dev.name());
+            match p.attach_to_if_index(dev.if_index(), XdpMode::Skb) {
+                Ok(_) => Ok(()),
+                Err(e) if is_hook_busy(&e) => Err(hook_conflict_error(dev)),
+                Err(e) => Err(e.into()),
+            }
+        }
+    }
+}
+
+fn is_hook_busy(e: &aya::programs::ProgramError) -> bool {
+    matches!(
+        e,
+        aya::programs::ProgramError::SyscallError(se)
+            if se.io_error.raw_os_error() == Some(libc::EBUSY)
+    )
+}
+
+fn hook_conflict_error(dev: &NetworkDevice) -> Box<dyn std::error::Error> {
+    let name = dev.name();
+    let who = match crate::netlink::xdp_prog_id(dev.if_index()) {
+        Ok(Some(id)) => format!("(program id {id}) "),
+        _ => String::new(),
+    };
+    format!(
+        "interface {name} already has an XDP program attached {who}\
+         — start with --xdp-chain-loading to run alongside it, detach it with \
+         `ip link set dev {name} xdp off`, or start with --no-xdp"
+    )
+    .into()
+}
+
+pub fn add_rx_port(ebpf: &mut Ebpf, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let map = ebpf.map_mut("RX_PORTS").ok_or("RX_PORTS map not found")?;
+    let mut ports: aya::maps::HashMap<_, u16, u8> = aya::maps::HashMap::try_from(map)?;
+    ports.insert(port, 1, 0)?;
+    Ok(())
+}
+
+pub fn register_xsk(
+    ebpf: &mut Ebpf,
+    queue: u32,
+    fd: std::os::fd::RawFd,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let map = ebpf.map_mut("XSKS").ok_or("XSKS map not found in xdp program")?;
+    let mut xsks = aya::maps::XskMap::try_from(map)?;
+    xsks.set(queue, fd, 0)?;
+    Ok(())
+}
+
 fn generate_xdp_elf() -> Vec<u8> {
     let mut buffer = vec![0u8; 4096];
     let mut cursor = Cursor::new(&mut buffer);
